@@ -34,6 +34,7 @@ RUN curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli
 # Copy cron scripts to the container
 COPY php.ini /usr/local/etc/php/conf.d/uploads.ini:ro
 COPY wp-config.php /var/www/html/wp-config.php
+COPY wp-config.php /custom-wp-config.php
 COPY .htaccess /var/www/html/.htaccess
 COPY ./wp_rocket_settings.json /wp_rocket_settings.json
 
@@ -47,6 +48,7 @@ RUN mkdir /data && \
     find -type f -exec chmod 644 {} \; && \
     find -type d -exec chmod 755 {} \; && \
     chmod 444 /var/www/html/wp-config.php && \
+    chmod 444 /custom-wp-config.php && \
     chmod 444 /var/www/html/.htaccess;
 
 # Copy the container-init script and make it executable

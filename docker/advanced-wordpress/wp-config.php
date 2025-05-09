@@ -48,11 +48,12 @@ define( 'DB_HOST', getenv_docker('WORDPRESS_DB_HOST', 'localhost') );
 define( 'DB_CHARSET', 'utf8');
 define( 'DB_COLLATE', '');
 
-# Redis Caching
-define('WP_REDIS_HOST', 'redis');
+# Redis Caching                                                                                                                
+define('WP_REDIS_HOST', 'redis');                                                                                              
 define('WP_REDIS_PORT', 6379);
+define('WP_REDIS_CLIENT', getenv_docker('REDIS_CLIENT', 'phpredis'));                                                          
 define('WP_REDIS_DATABASE', getenv_docker('REDIS_DB_INDEX', 0));
-define('WP_REDIS_PREFIX', 'site_' . getenv_docker('WORDPRESS_DB_NAME', '') . '_');
+define('WP_REDIS_PREFIX', getenv_docker('REDIS_PREFIX', 'site_' . getenv_docker('WORDPRESS_DB_NAME', '') . '_'));
 
 
 $table_prefix = getenv_docker('WORDPRESS_DB_PREFIX', 'wp_');

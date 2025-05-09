@@ -15,6 +15,25 @@ log_message() {
   echo -e "${BOLD_WHITE}${TIMESTAMP}${RESET} - ${LIGHT_GRAY}$1${RESET}" | tee -a /var/www/log/wordpress-website.log
 }
 
+# Function to wait for WordPress to be fully installed
+wait_for_wordpress() {
+  log_message "Waiting for WordPress core files to be fully installed..."
+  
+  # Wait for wp-settings.php to exist, which indicates WordPress is installed
+  while [ ! -f /var/www/html/wp-settings.php ]; do
+    log_message "WordPress core files not ready yet, waiting 2 seconds..."
+    sleep 2
+  done
+  
+  # Additional check - wait for wp-includes directory
+  while [ ! -d /var/www/html/wp-includes ]; do
+    log_message "WordPress includes directory not ready yet, waiting 2 seconds..."
+    sleep 2
+  done
+  
+  log_message "WordPress core files are ready."
+}
+
 # Function to check if the WordPress database exists
 check_database() {
   log_message "Checking for the WordPress database: $WORDPRESS_DB_NAME"
@@ -74,7 +93,6 @@ update_siteurl() {
   fi
 }
 
-
 # Fix WP Rocket
 fix_rocket() {
     log_message "Fixing WP Rocket..."
@@ -88,12 +106,37 @@ garbage_cleanup() {
 	fi;
 }
 
+# Copy and protect wp-config.php
+setup_wp_config() {
+  log_message "Setting up wp-config.php..."
+  
+  # Check if we need to copy our custom wp-config.php
+  if [ -f /custom-wp-config.php ]; then
+    log_message "Copying custom wp-config.php to WordPress root"
+    cp /custom-wp-config.php /var/www/html/wp-config.php
+  fi
+  
+  # Make wp-config.php read-only to prevent modifications
+  if [ -f /var/www/html/wp-config.php ]; then
+    log_message "Making wp-config.php read-only"
+    chmod 444 /var/www/html/wp-config.php
+    chown www-data:www-data /var/www/html/wp-config.php
+    log_message "wp-config.php is now protected (read-only)"
+  else
+    log_message "Warning: wp-config.php not found!"
+  fi
+}
+
+# Now wait for WordPress to be fully installed
+wait_for_wordpress
+
 # Main script execution
 check_database
 import_sql
 update_siteurl
 fix_rocket
 garbage_cleanup
+setup_wp_config
 
 # Pass control to the original docker-entrypoint.sh
 exec docker-entrypoint.sh apache2-foreground
