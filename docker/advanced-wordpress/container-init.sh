@@ -15,23 +15,20 @@ log_message() {
   echo -e "${BOLD_WHITE}${TIMESTAMP}${RESET} - ${LIGHT_GRAY}$1${RESET}" | tee -a /var/www/log/wordpress-website.log
 }
 
-# Function to wait for WordPress to be fully installed
-wait_for_wordpress() {
-  log_message "Waiting for WordPress core files to be fully installed..."
+# Copy and protect wp-config.php
+setup_wp_config() {
+  log_message "Setting up wp-config.php..."
   
-  # Wait for wp-settings.php to exist, which indicates WordPress is installed
-  while [ ! -f /var/www/html/wp-settings.php ]; do
-    log_message "WordPress core files not ready yet, waiting 2 seconds..."
-    sleep 2
-  done
-  
-  # Additional check - wait for wp-includes directory
-  while [ ! -d /var/www/html/wp-includes ]; do
-    log_message "WordPress includes directory not ready yet, waiting 2 seconds..."
-    sleep 2
-  done
-  
-  log_message "WordPress core files are ready."
+  # Check if we need to copy our custom wp-config.php
+  if [ -f /custom-wp-config.php ]; then
+    log_message "Copying custom wp-config.php to WordPress root"
+    # Don't overwite wp-config.php if it exists and we can't write to it
+    if [ -f /var/www/html/wp-config.php ] && [ ! -w /var/www/html/wp-config.php ]; then
+      log_message "wp-config.php exists and is not writable. Using existing file."
+    else
+      cp /custom-wp-config.php /var/www/html/wp-config.php || log_message "Error copying wp-config.php, continuing anyway"
+    fi
+  fi
 }
 
 # Function to check if the WordPress database exists
@@ -106,37 +103,31 @@ garbage_cleanup() {
 	fi;
 }
 
-# Copy and protect wp-config.php
-setup_wp_config() {
-  log_message "Setting up wp-config.php..."
-  
-  # Check if we need to copy our custom wp-config.php
-  if [ -f /custom-wp-config.php ]; then
-    log_message "Copying custom wp-config.php to WordPress root"
-    cp /custom-wp-config.php /var/www/html/wp-config.php
-  fi
-  
-  # Make wp-config.php read-only to prevent modifications
-  if [ -f /var/www/html/wp-config.php ]; then
-    log_message "Making wp-config.php read-only"
-    chmod 444 /var/www/html/wp-config.php
-    chown www-data:www-data /var/www/html/wp-config.php
-    log_message "wp-config.php is now protected (read-only)"
-  else
-    log_message "Warning: wp-config.php not found!"
-  fi
-}
+# Main script flow
+log_message "Starting WordPress container initialization"
 
-# Now wait for WordPress to be fully installed
-wait_for_wordpress
+# Let the WordPress entrypoint do its thing first
+log_message "Running WordPress docker-entrypoint.sh"
+docker-entrypoint.sh apache2-foreground &
 
-# Main script execution
+# Wait a bit for WordPress to initialize
+sleep 5
+
+# Setup wp-config after WordPress has started initializing
+setup_wp_config
+
+# Run our database operations
 check_database
 import_sql
+
+# Let WordPress finish starting up before trying to use WP-CLI
+sleep 5
+
+# Now run operations that depend on WordPress being available
 update_siteurl
 fix_rocket
 garbage_cleanup
-setup_wp_config
 
-# Pass control to the original docker-entrypoint.sh
-exec docker-entrypoint.sh apache2-foreground
+# Keep the script running to act as the container's entrypoint
+log_message "Initialization complete, container is now running"
+wait

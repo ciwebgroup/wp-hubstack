@@ -1,8 +1,5 @@
 services:
   %DB_NAME%:
-    build:
-      context: .
-      dockerfile: Dockerfile
     image: advanced-wordpress:latest  # Define the name of the built image
     deploy:
       resources:
@@ -11,7 +8,6 @@ services:
     container_name: %DB_NAME%
     volumes:
       - /var/run/docker.sock:/tmp/docker.sock:ro
-      - /var/opt/shared/php.ini:/usr/local/etc/php/conf.d/uploads.ini:ro
       - /var/opt/shared/wp-config.php:/var/www/html/wp-config.php:ro
       - /var/opt/shared/crons:/crons:ro
       - /var/opt/shared/.htaccess:/var/www/html/.htaccess
