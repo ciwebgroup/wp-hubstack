@@ -30,6 +30,9 @@ FIREWALL_TYPE="ufw"         # Options: "ufw", "firewalld", "none"
 # Dry run flag (default: no)
 DRY_RUN="no"                # Set to 'yes' to simulate actions without making changes
 
+# Add mounts only flag (default: no)
+ADD_MOUNTS_ONLY="no"        # Set to 'yes' to only add new mounts to existing user
+
 # --- Script Functions ---
 
 # Function to display usage information
@@ -45,11 +48,16 @@ usage() {
     echo "  -w, --writable-chroot          Enable 'allow_writeable_chroot=YES' (less secure)"
     echo "  -f, --firewall <type>          Set firewall type (ufw, firewalld, none, default: ${FIREWALL_TYPE})"
     echo "  -p, --pasv-ports <min:max>     Set passive port range (default: ${PASV_MIN_PORT}:${PASV_MAX_PORT})"
+    echo "  --add-mounts-only              Only add new mounts to existing user (skip full setup)"
     echo "  --dry-run                      Simulate the execution without making any changes"
     echo "  -h, --help                     Display this help message"
     echo ""
-    echo "Example:"
+    echo "Examples:"
+    echo "  # Full setup for new user:"
     echo "  sudo $0 -u myftpuser -b '/var/web::webroot /data::shared' -f ufw --dry-run"
+    echo ""
+    echo "  # Add new mounts to existing user:"
+    echo "  sudo $0 -u myftpuser -b '/new/path::newdir /another/path::anotherdir' --add-mounts-only"
     exit 1
 }
 
@@ -125,6 +133,10 @@ parse_arguments() {
                 fi
                 shift 2
                 ;;
+            --add-mounts-only)
+                ADD_MOUNTS_ONLY="yes"
+                shift
+                ;;
             --dry-run)
                 DRY_RUN="yes"
                 shift
@@ -176,6 +188,81 @@ create_user_and_dirs() {
         execute_or_log "Setting permissions of ${DEST_DIR_IN_CHROOT}" sudo chmod 755 "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to set permissions of ${DEST_DIR_IN_CHROOT}."
         log "Created bind-mount destination directory: ${DEST_DIR_IN_CHROOT}."
     done
+}
+
+# Function to add mounts to existing user (for --add-mounts-only mode)
+add_mounts_to_existing_user() {
+    log "Adding new mounts to existing user '${FTP_USER}'..."
+
+    # Check if user exists
+    if ! id "${FTP_USER}" &>/dev/null; then
+        error_exit "User '${FTP_USER}' does not exist. Cannot add mounts to non-existent user."
+    fi
+
+    # Ensure home directory exists
+    if [ ! -d "${HOME_DIR}" ]; then
+        error_exit "Home directory '${HOME_DIR}' does not exist for user '${FTP_USER}'."
+    fi
+
+    log "User '${FTP_USER}' exists with home directory '${HOME_DIR}'. Proceeding with mount additions."
+
+    # Create destination directories for new bind mounts
+    for mount_pair in "${BIND_MOUNTS[@]}"; do
+        DEST_PATH="${mount_pair##*::}"
+        DEST_DIR_IN_CHROOT="${HOME_DIR}/${DEST_PATH}"
+
+        # Check if mount already exists
+        FSTAB_ENTRY="${mount_pair%%::*} ${DEST_DIR_IN_CHROOT} none rw,rbind 0 0"
+        if grep -Fxq "${FSTAB_ENTRY}" /etc/fstab; then
+            log "Mount '${mount_pair}' already exists in fstab. Skipping."
+            continue
+        fi
+
+        if mountpoint -q "${DEST_DIR_IN_CHROOT}"; then
+            log "Mount point '${DEST_DIR_IN_CHROOT}' is already mounted. Skipping."
+            continue
+        fi
+
+        execute_or_log "Creating bind-mount destination directory ${DEST_DIR_IN_CHROOT}" sudo mkdir -p "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to create destination directory ${DEST_DIR_IN_CHROOT}."
+        execute_or_log "Setting ownership of ${DEST_DIR_IN_CHROOT}" sudo chown "${FTP_USER}:${FTP_USER}" "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to set ownership of ${DEST_DIR_IN_CHROOT}."
+        execute_or_log "Setting permissions of ${DEST_DIR_IN_CHROOT}" sudo chmod 755 "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to set permissions of ${DEST_DIR_IN_CHROOT}."
+        log "Created bind-mount destination directory: ${DEST_DIR_IN_CHROOT}."
+    done
+
+    # Set up the new bind mounts
+    for mount_pair in "${BIND_MOUNTS[@]}"; do
+        SOURCE_PATH="${mount_pair%%::*}"
+        DEST_PATH="${mount_pair##*::}"
+        DEST_DIR_IN_CHROOT="${HOME_DIR}/${DEST_PATH}"
+
+        # Check if mount already exists
+        FSTAB_ENTRY="${SOURCE_PATH} ${DEST_DIR_IN_CHROOT} none rw,rbind 0 0"
+        if grep -Fxq "${FSTAB_ENTRY}" /etc/fstab; then
+            log "Mount '${mount_pair}' already exists in fstab. Skipping setup."
+            continue
+        fi
+
+        if mountpoint -q "${DEST_DIR_IN_CHROOT}"; then
+            log "Mount point '${DEST_DIR_IN_CHROOT}' is already mounted. Skipping setup."
+            continue
+        fi
+
+        # Ensure source directory exists and has appropriate permissions
+        execute_or_log "Creating source directory ${SOURCE_PATH}" sudo mkdir -p "${SOURCE_PATH}" || error_exit "Failed to create source directory ${SOURCE_PATH}."
+        execute_or_log "Setting ownership of source directory ${SOURCE_PATH}" sudo chown -R "${FTP_USER}:${FTP_USER}" "${SOURCE_PATH}" || log "Warning: Failed to set ownership of ${SOURCE_PATH}. Check manually."
+        execute_or_log "Setting permissions of source directory ${SOURCE_PATH}" sudo chmod -R 775 "${SOURCE_PATH}" || log "Warning: Failed to set permissions of ${SOURCE_PATH}. Check manually."
+        log "Ensured source directory '${SOURCE_PATH}' exists and permissions set."
+
+        # Perform the bind mount
+        execute_or_log "Bind mounting ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}" sudo mount --rbind "${SOURCE_PATH}" "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to bind mount ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}."
+        log "Bind mounted '${SOURCE_PATH}' to '${DEST_DIR_IN_CHROOT}'."
+
+        # Add to /etc/fstab for persistence
+        execute_or_log "Adding fstab entry for persistence" echo "${FSTAB_ENTRY}" | sudo tee -a /etc/fstab > /dev/null || error_exit "Failed to add fstab entry."
+        log "Added fstab entry for persistence: ${FSTAB_ENTRY}."
+    done
+
+    log "Successfully added ${#BIND_MOUNTS[@]} new mount(s) to user '${FTP_USER}'."
 }
 
 # Function to set up source directories and bind mounts
@@ -309,6 +396,19 @@ main() {
 
     # Parse command-line arguments
     parse_arguments "$@"
+
+    # Handle add-mounts-only mode
+    if [ "${ADD_MOUNTS_ONLY}" == "yes" ]; then
+        log "Add-mounts-only mode enabled for user: '${FTP_USER}'"
+        log "Home directory: '${HOME_DIR}'"
+        log "New bind mounts to add: ${BIND_MOUNTS[@]}"
+        log "Dry run enabled: ${DRY_RUN}"
+        echo ""
+
+        add_mounts_to_existing_user
+        log "Mount addition complete! New mounts have been added to user '${FTP_USER}'."
+        return 0
+    fi
 
     log "Starting vsftpd setup for user: '${FTP_USER}'"
     log "Home directory: '${HOME_DIR}'"
