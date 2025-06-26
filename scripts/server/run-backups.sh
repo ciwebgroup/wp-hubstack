@@ -139,11 +139,11 @@ for pair in "${CONTAINER_PAIRS[@]}"; do
         mv "/var/opt/$tarball_name" /var/opt/backup-tarballs/
 
         if [ $DELETE -eq 1 ]; then
-            echo "Stopping and removing Docker container $container..."
-            docker stop "$container"
-            docker rm "$container"
             echo "Deleting directory $working_dir..."
             rm -rf "$working_dir"
+            echo "Stopping and removing Docker container $container..."
+            docker stop "$container" 2>/dev/null || true # Ignore errors
+            docker rm "$container" 2>/dev/null || true # Ignore errors
         fi
     fi
 
