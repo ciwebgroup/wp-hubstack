@@ -372,6 +372,31 @@ setup_bind_mounts() {
     done
 }
 
+# Function to add or update a configuration parameter in vsftpd.conf
+add_or_update_vsftpd_config() {
+    local key="$1"
+    local value="$2"
+    local config_file="${VSFTPD_CONF}"
+    
+    if [ "${DRY_RUN}" == "yes" ]; then
+        log "DRY RUN: Would set ${key}=${value} in ${config_file}"
+        return 0
+    fi
+    
+    # Check if the key already exists with the correct value
+    if grep -q "^${key}=${value}$" "${config_file}" 2>/dev/null; then
+        log "Configuration ${key}=${value} already exists with correct value. Skipping."
+        return 0
+    fi
+    
+    # Remove any existing instances of this key (including commented ones)
+    sudo sed -i "/^#*${key}=/d" "${config_file}"
+    
+    # Add the new configuration
+    echo "${key}=${value}" | sudo tee -a "${config_file}" > /dev/null
+    log "Added/updated configuration: ${key}=${value}"
+}
+
 # Function to configure vsftpd
 configure_vsftpd() {
     log "3. Configuring vsftpd..."
@@ -384,40 +409,28 @@ configure_vsftpd() {
         log "Skipping vsftpd.conf backup (file doesn't exist or backup already present)."
     fi
 
-    # Update vsftpd.conf (using sed for idempotent operations)
-    log "Removing potentially conflicting lines from ${VSFTPD_CONF}."
-    execute_or_log "Removing listen" sudo sed -i '/^listen=/d' "${VSFTPD_CONF}"
-    execute_or_log "Removing listen_ipv6" sudo sed -i '/^listen_ipv6=/d' "${VSFTPD_CONF}"
-    execute_or_log "Removing anonymous_enable" sudo sed -i '/^anonymous_enable=/d' "${VSFTPD_CONF}"
-    execute_or_log "Removing local_enable" sudo sed -i '/^local_enable=/d' "${VSFTPD_CONF}"
-    execute_or_log "Removing write_enable" sudo sed -i '/^write_enable=/d' "${VSFTPD_CONF}"
-    execute_or_log "Removing chroot_local_user" sudo sed -i '/^chroot_local_user=/d' "${VSFTPD_CONF}"
-    execute_or_log "Removing allow_writeable_chroot" sudo sed -i '/^allow_writeable_chroot=/d' "${VSFTPD_CONF}"
-    execute_or_log "Removing pasv_enable" sudo sed -i '/^pasv_enable=/d' "${VSFTPD_CONF}"
-    execute_or_log "Removing pasv_min_port" sudo sed -i '/^pasv_min_port=/d' "${VSFTPD_CONF}"
-    execute_or_log "Removing pasv_max_port" sudo sed -i '/^pasv_max_port=/d' "${VSFTPD_CONF}"
-    execute_or_log "Removing xferlog_enable" sudo sed -i '/^xferlog_enable=/d' "${VSFTPD_CONF}"
-    execute_or_log "Removing xferlog_file" sudo sed -i '/^xferlog_file=/d' "${VSFTPD_CONF}"
-    execute_or_log "Removing xferlog_std_format" sudo sed -i '/^xferlog_std_format=/d' "${VSFTPD_CONF}"
+    # Create vsftpd.conf if it doesn't exist
+    if [ ! -f "${VSFTPD_CONF}" ]; then
+        execute_or_log "Creating ${VSFTPD_CONF}" sudo touch "${VSFTPD_CONF}" || error_exit "Failed to create ${VSFTPD_CONF}."
+        log "Created ${VSFTPD_CONF}."
+    fi
 
-    log "Adding/appending required settings to ${VSFTPD_CONF}."
-    VSFTPD_SETTINGS=$(cat <<EOF
-listen=NO
-listen_ipv6=YES
-anonymous_enable=NO
-local_enable=YES
-write_enable=YES
-chroot_local_user=YES
-allow_writeable_chroot=${ALLOW_WRITEABLE_CHROOT}
-pasv_enable=YES
-pasv_min_port=${PASV_MIN_PORT}
-pasv_max_port=${PASV_MAX_PORT}
-xferlog_enable=YES
-xferlog_file=/var/log/vsftpd.log
-xferlog_std_format=YES
-EOF
-)
-    execute_or_log "Appending new vsftpd configuration" echo "${VSFTPD_SETTINGS}" | sudo tee -a "${VSFTPD_CONF}" > /dev/null || error_exit "Failed to write vsftpd.conf settings."
+    log "Configuring vsftpd settings (checking for existing values)..."
+    
+    # Add or update each configuration parameter
+    add_or_update_vsftpd_config "listen" "NO"
+    add_or_update_vsftpd_config "listen_ipv6" "YES"
+    add_or_update_vsftpd_config "anonymous_enable" "NO"
+    add_or_update_vsftpd_config "local_enable" "YES"
+    add_or_update_vsftpd_config "write_enable" "YES"
+    add_or_update_vsftpd_config "chroot_local_user" "YES"
+    add_or_update_vsftpd_config "allow_writeable_chroot" "${ALLOW_WRITEABLE_CHROOT}"
+    add_or_update_vsftpd_config "pasv_enable" "YES"
+    add_or_update_vsftpd_config "pasv_min_port" "${PASV_MIN_PORT}"
+    add_or_update_vsftpd_config "pasv_max_port" "${PASV_MAX_PORT}"
+    add_or_update_vsftpd_config "xferlog_enable" "YES"
+    add_or_update_vsftpd_config "xferlog_file" "/var/log/vsftpd.log"
+    add_or_update_vsftpd_config "xferlog_std_format" "YES"
 
     log "Updated ${VSFTPD_CONF} with chroot, passive mode, and logging settings."
 }
@@ -426,7 +439,7 @@ EOF
 setup_firewall() {
     log "4. Configuring firewall (${FIREWALL_TYPE})..."
 
-    if [ "${FIREWAL_TYPE}" == "ufw" ]; then
+    if [ "${FIREWALL_TYPE}" == "ufw" ]; then
         if ! command_exists ufw; then
             log "UFW not found. Installing UFW..."
             if [ "${DRY_RUN}" == "no" ]; then
