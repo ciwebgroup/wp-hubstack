@@ -45,9 +45,11 @@ usage() {
     echo ""
     echo "Options:"
     echo "  -u, --user <username>          Set the FTP system username (default: ${FTP_USER})"
-    echo "  -b, --bind-mounts <'src::dest src2::dest2'> "
-    echo "                                 Set bind mounts (default: ${BIND_MOUNTS[@]})"
-    echo "                                 Separate multiple mounts with spaces, e.g., 'src1::dest1 src2::dest2'"
+    echo "  -b, --bind-mounts <mounts>     Set bind mounts in one of two formats:"
+    echo "                                 1. Space-separated: 'src1::dest1 src2::dest2'"
+    echo "                                 2. File path: path to text file with one mount per line"
+    echo "                                 File format: each line should be 'source::destination'"
+    echo "                                 (Comments with # or // are supported in files)"
     echo "  -w, --writable-chroot          Enable 'allow_writeable_chroot=YES' (less secure)"
     echo "  -f, --firewall <type>          Set firewall type (ufw, firewalld, none, default: ${FIREWALL_TYPE})"
     echo "  -p, --pasv-ports <min:max>     Set passive port range (default: ${PASV_MIN_PORT}:${PASV_MAX_PORT})"
@@ -57,14 +59,22 @@ usage() {
     echo "  -h, --help                     Display this help message"
     echo ""
     echo "Examples:"
-    echo "  # Full setup for new user:"
+    echo "  # Full setup with space-separated mounts:"
     echo "  sudo $0 -u myftpuser -b '/var/web::webroot /data::shared' -f ufw --dry-run"
     echo ""
-    echo "  # Full setup with temporary password generation:"
-    echo "  sudo $0 -u myftpuser -b '/var/web::webroot' --generate-password"
+    echo "  # Full setup using bind mounts file:"
+    echo "  sudo $0 -u myftpuser -b /path/to/mounts.txt --generate-password"
     echo ""
-    echo "  # Add new mounts to existing user:"
-    echo "  sudo $0 -u myftpuser -b '/new/path::newdir /another/path::anotherdir' --add-mounts-only"
+    echo "  # Add new mounts from file to existing user:"
+    echo "  sudo $0 -u myftpuser -b /path/to/additional-mounts.txt --add-mounts-only"
+    echo ""
+    echo "Bind mounts file format example (/path/to/mounts.txt):"
+    echo "  # Web directories"
+    echo "  /var/www/site1::site1"
+    echo "  /var/www/site2::site2"
+    echo "  // Shared resources"
+    echo "  /opt/shared::shared"
+    echo "  /data/uploads::uploads"
     exit 1
 }
 
@@ -138,6 +148,84 @@ set_user_password() {
 }
 
 
+# Function to parse bind mounts from a file
+parse_bind_mounts_file() {
+    local file_path="$1"
+    
+    if [ ! -f "${file_path}" ]; then
+        error_exit "Bind mounts file '${file_path}' does not exist or is not readable."
+    fi
+    
+    log "Parsing bind mounts from file: ${file_path}"
+    
+    # Clear existing bind mounts
+    BIND_MOUNTS=()
+    
+    local line_number=0
+    local valid_mounts=0
+    
+    while IFS= read -r line || [ -n "$line" ]; do
+        line_number=$((line_number + 1))
+        
+        # Skip empty lines and comments (lines starting with # or //)
+        if [[ -z "$line" ]] || [[ "$line" =~ ^[[:space:]]*# ]] || [[ "$line" =~ ^[[:space:]]*// ]]; then
+            continue
+        fi
+        
+        # Trim leading and trailing whitespace
+        line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        
+        # Skip empty lines after trimming
+        if [[ -z "$line" ]]; then
+            continue
+        fi
+        
+        # Validate format: must contain "::" separator
+        if [[ ! "$line" =~ :: ]]; then
+            log "Warning: Line ${line_number} in '${file_path}' is invalid (missing '::' separator): ${line}"
+            continue
+        fi
+        
+        # Extract source and destination paths
+        local source_path="${line%%::*}"
+        local dest_path="${line##*::}"
+        
+        # Trim whitespace from paths
+        source_path=$(echo "$source_path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        dest_path=$(echo "$dest_path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        
+        # Validate that both paths are not empty
+        if [[ -z "$source_path" ]] || [[ -z "$dest_path" ]]; then
+            log "Warning: Line ${line_number} in '${file_path}' has empty source or destination path: ${line}"
+            continue
+        fi
+        
+        # Validate that destination path doesn't start with / (should be relative to chroot)
+        if [[ "$dest_path" =~ ^/ ]]; then
+            log "Warning: Line ${line_number} in '${file_path}' has absolute destination path (should be relative): ${line}"
+            log "         Converting '${dest_path}' to '${dest_path#/}'"
+            dest_path="${dest_path#/}"
+        fi
+        
+        # Add the validated mount pair
+        BIND_MOUNTS+=("${source_path}::${dest_path}")
+        valid_mounts=$((valid_mounts + 1))
+        
+        if [ "${DRY_RUN}" == "yes" ]; then
+            log "DRY RUN: Would add bind mount: '${source_path}' -> '${dest_path}'"
+        else
+            log "Added bind mount from file: '${source_path}' -> '${dest_path}'"
+        fi
+        
+    done < "${file_path}"
+    
+    log "Parsed ${valid_mounts} valid bind mount(s) from '${file_path}' (${line_number} total lines processed)"
+    
+    if [ ${valid_mounts} -eq 0 ]; then
+        error_exit "No valid bind mounts found in file '${file_path}'. Please check the file format."
+    fi
+}
+
 # Function to parse command-line arguments
 parse_arguments() {
     while [[ "$#" -gt 0 ]]; do
@@ -148,12 +236,22 @@ parse_arguments() {
                 shift 2
                 ;;
             -b|--bind-mounts)
-                # Clear existing and parse new bind mounts
-                BIND_MOUNTS=()
-                IFS=' ' read -r -a mounts_array <<< "$2"
-                for mount_pair in "${mounts_array[@]}"; do
-                    BIND_MOUNTS+=("$mount_pair")
-                done
+                # Check if the argument is a file path or space-separated mounts
+                if [ -f "$2" ]; then
+                    # It's a file - parse bind mounts from file
+                    parse_bind_mounts_file "$2"
+                else
+                    # It's space-separated mounts - use existing logic
+                    BIND_MOUNTS=()
+                    IFS=' ' read -r -a mounts_array <<< "$2"
+                    for mount_pair in "${mounts_array[@]}"; do
+                        # Validate format
+                        if [[ ! "$mount_pair" =~ :: ]]; then
+                            error_exit "Invalid bind mount format: '${mount_pair}'. Expected format: 'source::destination'"
+                        fi
+                        BIND_MOUNTS+=("$mount_pair")
+                    done
+                fi
                 shift 2
                 ;;
             -w|--writable-chroot)
