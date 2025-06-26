@@ -372,6 +372,39 @@ setup_bind_mounts() {
     done
 }
 
+# Function to clean up any accidentally leaked log timestamps from vsftpd.conf
+clean_vsftpd_config_timestamps() {
+    local config_file="${VSFTPD_CONF}"
+    
+    if [ "${DRY_RUN}" == "yes" ]; then
+        log "DRY RUN: Would clean any timestamp entries from ${config_file}"
+        return 0
+    fi
+    
+    if [ ! -f "${config_file}" ]; then
+        return 0  # File doesn't exist, nothing to clean
+    fi
+    
+    # Remove any lines that look like timestamps: [YYYY-MM-DD HH:MM:SS]
+    # Also remove lines with [DRY RUN] prefix that might have leaked
+    local lines_removed=0
+    
+    # Count lines before cleanup
+    local lines_before=$(wc -l < "${config_file}" 2>/dev/null || echo "0")
+    
+    # Remove timestamp lines and dry run lines
+    sudo sed -i '/^\[20[0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]\]/d' "${config_file}" 2>/dev/null
+    sudo sed -i '/^\[DRY RUN\]/d' "${config_file}" 2>/dev/null
+    
+    # Count lines after cleanup
+    local lines_after=$(wc -l < "${config_file}" 2>/dev/null || echo "0")
+    lines_removed=$((lines_before - lines_after))
+    
+    if [ ${lines_removed} -gt 0 ]; then
+        log "Cleaned ${lines_removed} timestamp/log entries from ${config_file}"
+    fi
+}
+
 # Function to add or update a configuration parameter in vsftpd.conf
 add_or_update_vsftpd_config() {
     local key="$1"
@@ -390,11 +423,27 @@ add_or_update_vsftpd_config() {
     fi
     
     # Remove any existing instances of this key (including commented ones)
-    sudo sed -i "/^#*${key}=/d" "${config_file}"
+    sudo sed -i "/^#*${key}=/d" "${config_file}" 2>/dev/null
     
-    # Add the new configuration
-    echo "${key}=${value}" | sudo tee -a "${config_file}" > /dev/null
-    log "Added/updated configuration: ${key}=${value}"
+    # Add the new configuration using a temporary variable to avoid any logging contamination
+    # Create the config line in a variable first
+    local config_line="${key}=${value}"
+    
+    # Write the configuration line directly to the file using printf to avoid any shell interpretation
+    # Use a subshell to completely isolate the file write operation
+    (
+        # Redirect all output to prevent any accidental logging contamination
+        exec 1>/dev/null 2>/dev/null
+        # Write the config line using printf which is more reliable than echo
+        printf '%s\n' "${config_line}" | sudo tee -a "${config_file}" >/dev/null 2>&1
+    )
+    
+    # Verify the write was successful by checking if the line exists
+    if grep -q "^${key}=${value}$" "${config_file}" 2>/dev/null; then
+        log "Added/updated configuration: ${key}=${value}"
+    else
+        error_exit "Failed to write configuration ${key}=${value} to ${config_file}"
+    fi
 }
 
 # Function to configure vsftpd
@@ -414,6 +463,9 @@ configure_vsftpd() {
         execute_or_log "Creating ${VSFTPD_CONF}" sudo touch "${VSFTPD_CONF}" || error_exit "Failed to create ${VSFTPD_CONF}."
         log "Created ${VSFTPD_CONF}."
     fi
+
+    # Clean up any accidentally leaked timestamps from previous runs
+    clean_vsftpd_config_timestamps
 
     log "Configuring vsftpd settings (checking for existing values)..."
     
