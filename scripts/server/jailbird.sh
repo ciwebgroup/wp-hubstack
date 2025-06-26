@@ -33,6 +33,9 @@ DRY_RUN="no"                # Set to 'yes' to simulate actions without making ch
 # Add mounts only flag (default: no)
 ADD_MOUNTS_ONLY="no"        # Set to 'yes' to only add new mounts to existing user
 
+# Generate password flag (default: no)
+GENERATE_PASSWORD="no"      # Set to 'yes' to generate and set a temporary password
+
 # --- Script Functions ---
 
 # Function to display usage information
@@ -49,12 +52,16 @@ usage() {
     echo "  -f, --firewall <type>          Set firewall type (ufw, firewalld, none, default: ${FIREWALL_TYPE})"
     echo "  -p, --pasv-ports <min:max>     Set passive port range (default: ${PASV_MIN_PORT}:${PASV_MAX_PORT})"
     echo "  --add-mounts-only              Only add new mounts to existing user (skip full setup)"
+    echo "  --generate-password            Generate and set a temporary password for the user"
     echo "  --dry-run                      Simulate the execution without making any changes"
     echo "  -h, --help                     Display this help message"
     echo ""
     echo "Examples:"
     echo "  # Full setup for new user:"
     echo "  sudo $0 -u myftpuser -b '/var/web::webroot /data::shared' -f ufw --dry-run"
+    echo ""
+    echo "  # Full setup with temporary password generation:"
+    echo "  sudo $0 -u myftpuser -b '/var/web::webroot' --generate-password"
     echo ""
     echo "  # Add new mounts to existing user:"
     echo "  sudo $0 -u myftpuser -b '/new/path::newdir /another/path::anotherdir' --add-mounts-only"
@@ -99,6 +106,37 @@ execute_or_log() {
     return 0 # Always succeed in dry run
 }
 
+# Function to generate a secure temporary password
+generate_temp_password() {
+    # Generate a 16-character password with letters, numbers, and safe symbols
+    # Using /dev/urandom for cryptographically secure randomness
+    if command_exists openssl; then
+        # Use openssl for better randomness (most common)
+        openssl rand -base64 32 | tr -d "=+/" | cut -c1-16
+    elif [ -r /dev/urandom ]; then
+        # Fallback to /dev/urandom with tr
+        tr -dc 'A-Za-z0-9!@#$%^&*' < /dev/urandom | head -c 16
+    else
+        # Last resort - use $RANDOM (less secure but universally available)
+        echo "$(date +%s)${RANDOM}${RANDOM}" | sha256sum | head -c 16
+    fi
+}
+
+# Function to set password for user
+set_user_password() {
+    local username="$1"
+    local password="$2"
+    
+    if [ "${DRY_RUN}" == "no" ]; then
+        # Use chpasswd to set password non-interactively
+        echo "${username}:${password}" | sudo chpasswd
+        return $?
+    else
+        log "DRY RUN: Would set password for user ${username}"
+        return 0
+    fi
+}
+
 
 # Function to parse command-line arguments
 parse_arguments() {
@@ -137,6 +175,10 @@ parse_arguments() {
                 ADD_MOUNTS_ONLY="yes"
                 shift
                 ;;
+            --generate-password)
+                GENERATE_PASSWORD="yes"
+                shift
+                ;;
             --dry-run)
                 DRY_RUN="yes"
                 shift
@@ -156,11 +198,39 @@ create_user_and_dirs() {
     log "1. Creating FTP user '${FTP_USER}' and home directory structure..."
 
     # Check if user exists, create if not
+    USER_CREATED="no"
     if ! id "${FTP_USER}" &>/dev/null; then
         execute_or_log "Creating user ${FTP_USER}" sudo adduser --disabled-password --gecos "" "${FTP_USER}" || error_exit "Failed to add user ${FTP_USER}."
         log "User '${FTP_USER}' created."
+        USER_CREATED="yes"
     else
         log "User '${FTP_USER}' already exists. Skipping user creation."
+    fi
+
+    # Handle password generation if requested
+    if [ "${GENERATE_PASSWORD}" == "yes" ]; then
+        if [ "${USER_CREATED}" == "yes" ] || [ "${ADD_MOUNTS_ONLY}" != "yes" ]; then
+            log "Generating temporary password for user '${FTP_USER}'..."
+            TEMP_PASSWORD=$(generate_temp_password)
+            
+            if [ -n "${TEMP_PASSWORD}" ]; then
+                execute_or_log "Setting temporary password" set_user_password "${FTP_USER}" "${TEMP_PASSWORD}" || error_exit "Failed to set password for user ${FTP_USER}."
+                
+                if [ "${DRY_RUN}" == "no" ]; then
+                    log "SUCCESS: Temporary password set for user '${FTP_USER}'"
+                    log "============================================"
+                    log "TEMPORARY PASSWORD: ${TEMP_PASSWORD}"
+                    log "============================================"
+                    log "IMPORTANT: Please save this password securely and consider changing it after first login!"
+                else
+                    log "DRY RUN: Would generate and set temporary password for user '${FTP_USER}'"
+                fi
+            else
+                error_exit "Failed to generate temporary password."
+            fi
+        else
+            log "Password generation requested but user already exists and add-mounts-only mode is active. Skipping password generation."
+        fi
     fi
 
     # Ensure home directory exists and set secure permissions
@@ -463,7 +533,13 @@ main() {
     echo ""
 
     log "Setup complete! Please test your FTP connection for user '${FTP_USER}'."
-    log "Remember to set a password for the user if you haven't already: 'sudo passwd ${FTP_USER}'"
+    
+    if [ "${GENERATE_PASSWORD}" == "yes" ]; then
+        log "User password has been automatically generated and set (see above for password details)."
+    else
+        log "Remember to set a password for the user if you haven't already: 'sudo passwd ${FTP_USER}'"
+    fi
+    
     log "If you encounter issues, check vsftpd logs: 'journalctl -u vsftpd' or 'tail -f /var/log/vsftpd.log'"
     log "Also check system authentication logs: 'tail -f /var/log/auth.log'"
 }
