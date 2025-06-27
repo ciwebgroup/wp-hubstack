@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 # This script automates the setup of vsftpd with chroot jail and rbind mounts.
 # It allows a system user to access specific directories via mount --rbind
 # while being "jailed" to their home directory and the recursively bound mounted directories.
@@ -147,6 +149,73 @@ set_user_password() {
     fi
 }
 
+
+# Function to safely add an entry to /etc/fstab without logging contamination
+add_fstab_entry() {
+    local fstab_entry="$1"
+    local description="$2"
+    
+    if [ "${DRY_RUN}" == "yes" ]; then
+        log "DRY RUN: Would add fstab entry: ${fstab_entry}"
+        return 0
+    fi
+    
+    # Check if entry already exists
+    if grep -Fxq "${fstab_entry}" /etc/fstab 2>/dev/null; then
+        log "Fstab entry already exists: ${fstab_entry}"
+        return 0
+    fi
+    
+    # Add the fstab entry using a completely isolated write operation
+    (
+        # Redirect all output to prevent any accidental logging contamination
+        exec 1>/dev/null 2>/dev/null
+        # Write the fstab entry using printf to avoid shell interpretation
+        printf '%s\n' "${fstab_entry}" | sudo tee -a /etc/fstab >/dev/null 2>&1
+    )
+    
+    # Verify the entry was added successfully
+    if grep -Fxq "${fstab_entry}" /etc/fstab 2>/dev/null; then
+        log "Added fstab entry: ${fstab_entry}"
+    else
+        error_exit "Failed to add fstab entry: ${fstab_entry}"
+    fi
+}
+
+# Function to clean up any accidentally leaked log timestamps from /etc/fstab
+clean_fstab_timestamps() {
+    if [ "${DRY_RUN}" == "yes" ]; then
+        log "DRY RUN: Would clean any timestamp entries from /etc/fstab"
+        return 0
+    fi
+    
+    if [ ! -f "/etc/fstab" ]; then
+        return 0  # File doesn't exist, nothing to clean
+    fi
+    
+    # Backup fstab before cleaning
+    sudo cp /etc/fstab /etc/fstab.backup-$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
+    
+    # Remove any lines that look like timestamps or log entries
+    local lines_removed=0
+    
+    # Count lines before cleanup
+    local lines_before=$(wc -l < /etc/fstab 2>/dev/null || echo "0")
+    
+    # Remove timestamp lines, dry run lines, and log contamination
+    sudo sed -i '/^\[20[0-9][0-9]-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]\]/d' /etc/fstab 2>/dev/null
+    sudo sed -i '/^\[DRY RUN\]/d' /etc/fstab 2>/dev/null
+    sudo sed -i '/Adding fstab entry for persistence:/d' /etc/fstab 2>/dev/null
+    sudo sed -i '/echo.*tee.*fstab/d' /etc/fstab 2>/dev/null
+    
+    # Count lines after cleanup
+    local lines_after=$(wc -l < /etc/fstab 2>/dev/null || echo "0")
+    lines_removed=$((lines_before - lines_after))
+    
+    if [ ${lines_removed} -gt 0 ]; then
+        log "Cleaned ${lines_removed} contaminated entries from /etc/fstab (backup created)"
+    fi
+}
 
 # Function to parse bind mounts from a file
 parse_bind_mounts_file() {
@@ -386,6 +455,9 @@ add_mounts_to_existing_user() {
             continue
         fi
 
+        add_fstab_entry "${FSTAB_ENTRY}" "Bind mount for ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}"
+
+        # Check if mount point already exists
         if mountpoint -q "${DEST_DIR_IN_CHROOT}"; then
             log "Mount point '${DEST_DIR_IN_CHROOT}' is already mounted. Skipping."
             continue
@@ -395,6 +467,7 @@ add_mounts_to_existing_user() {
         execute_or_log "Setting ownership of ${DEST_DIR_IN_CHROOT}" sudo chown "${FTP_USER}:${FTP_USER}" "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to set ownership of ${DEST_DIR_IN_CHROOT}."
         execute_or_log "Setting permissions of ${DEST_DIR_IN_CHROOT}" sudo chmod 755 "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to set permissions of ${DEST_DIR_IN_CHROOT}."
         log "Created bind-mount destination directory: ${DEST_DIR_IN_CHROOT}."
+        
     done
 
     # Set up the new bind mounts
@@ -410,6 +483,9 @@ add_mounts_to_existing_user() {
             continue
         fi
 
+        # Add to /etc/fstab for persistence
+        add_fstab_entry "${FSTAB_ENTRY}" "Bind mount for ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}"
+
         if mountpoint -q "${DEST_DIR_IN_CHROOT}"; then
             log "Mount point '${DEST_DIR_IN_CHROOT}' is already mounted. Skipping setup."
             continue
@@ -422,12 +498,9 @@ add_mounts_to_existing_user() {
         log "Ensured source directory '${SOURCE_PATH}' exists and permissions set."
 
         # Perform the bind mount
-        execute_or_log "Bind mounting ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}" sudo mount --rbind "${SOURCE_PATH}" "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to bind mount ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}."
+        execute_or_log "Bind mounting ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}" mount --rbind "${SOURCE_PATH}" "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to bind mount ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}."
         log "Bind mounted '${SOURCE_PATH}' to '${DEST_DIR_IN_CHROOT}'."
-
-        # Add to /etc/fstab for persistence
-        execute_or_log "Adding fstab entry for persistence" echo "${FSTAB_ENTRY}" | sudo tee -a /etc/fstab > /dev/null || error_exit "Failed to add fstab entry."
-        log "Added fstab entry for persistence: ${FSTAB_ENTRY}."
+        
     done
 
     log "Successfully added ${#BIND_MOUNTS[@]} new mount(s) to user '${FTP_USER}'."
@@ -451,22 +524,23 @@ setup_bind_mounts() {
         execute_or_log "Setting permissions of source directory ${SOURCE_PATH}" sudo chmod -R 775 "${SOURCE_PATH}" || log "Warning: Failed to set permissions of ${SOURCE_PATH}. Check manually."
         log "Ensured source directory '${SOURCE_PATH}' exists and permissions set (may need manual adjustment)."
 
+        # Check if mount already exists
+        FSTAB_ENTRY="${SOURCE_PATH} ${DEST_DIR_IN_CHROOT} none rw,rbind 0 0"
+        if grep -Fxq "${FSTAB_ENTRY}" /etc/fstab; then
+            log "Mount '${mount_pair}' already exists in fstab. Skipping setup."
+            continue
+        fi
+
+        add_fstab_entry "${FSTAB_ENTRY}" "Bind mount for ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}"
+
         # Perform the bind mount
         if ! mountpoint -q "${DEST_DIR_IN_CHROOT}"; then
-            execute_or_log "Bind mounting ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}" sudo mount --rbind "${SOURCE_PATH}" "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to bind mount ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}."
+            execute_or_log "Bind mounting ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}" mount --rbind "${SOURCE_PATH}" "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to bind mount ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}."
             log "Bind mounted '${SOURCE_PATH}' to '${DEST_DIR_IN_CHROOT}'."
         else
             log "Mount point '${DEST_DIR_IN_CHROOT}' is already mounted. Skipping."
         fi
-
-        # Add to /etc/fstab for persistence if not already there
-        FSTAB_ENTRY="${SOURCE_PATH} ${DEST_DIR_IN_CHROOT} none rw,rbind 0 0"
-        if ! grep -Fxq "${FSTAB_ENTRY}" /etc/fstab; then
-            execute_or_log "Adding fstab entry for persistence" echo "${FSTAB_ENTRY}" | sudo tee -a /etc/fstab > /dev/null || error_exit "Failed to add fstab entry."
-            log "Added fstab entry for persistence: ${FSTAB_ENTRY}."
-        else
-            log "Fstab entry already exists for '${SOURCE_PATH}' to '${DEST_DIR_IN_CHROOT}'. Skipping."
-        fi
+    
     done
 }
 
@@ -630,6 +704,9 @@ main() {
     # Parse command-line arguments
     parse_arguments "$@"
 
+    # Clean up any existing fstab contamination from previous runs
+    clean_fstab_timestamps
+
     # Handle add-mounts-only mode
     if [ "${ADD_MOUNTS_ONLY}" == "yes" ]; then
         log "Add-mounts-only mode enabled for user: '${FTP_USER}'"
@@ -710,3 +787,5 @@ main() {
 # Execute the main function
 main "$@"
 
+
+set +euo pipefail
