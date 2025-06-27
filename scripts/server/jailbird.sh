@@ -44,6 +44,9 @@ VERBOSE_MODE="no"           # Set to 'yes' to enable detailed logging
 # Check mounts flag (default: no)
 CHECK_MOUNTS_ONLY="no"      # Set to 'yes' to only check mount status
 
+# Keep original owner flag (default: no)
+KEEP_ORIGINAL_OWNER="no"    # Set to 'yes' to preserve source directory ownership
+
 # --- Script Functions ---
 
 # Function to display usage information
@@ -65,6 +68,7 @@ usage() {
     echo "  --generate-password            Generate and set a temporary password for the user"
     echo "  --verbose                      Enable verbose logging and detailed output"
     echo "  --check-mounts                 Check and report status of existing mounts"
+    echo "  --keep-original-owner          Preserve source directory ownership, add FTP user to group"
     echo "  --dry-run                      Simulate the execution without making any changes"
     echo "  -h, --help                     Display this help message"
     echo ""
@@ -84,6 +88,9 @@ usage() {
     echo "  # Verbose setup with detailed logging:"
     echo "  sudo $0 -u myftpuser -b /path/to/mounts.txt --verbose --generate-password"
     echo ""
+    echo "  # Preserve original ownership and add FTP user to existing groups:"
+    echo "  sudo $0 -u myftpuser -b /path/to/mounts.txt --keep-original-owner"
+    echo ""
     echo "Bind mounts file format example (/path/to/mounts.txt):"
     echo "  # Web directories"
     echo "  /var/www/site1::site1"
@@ -91,6 +98,12 @@ usage() {
     echo "  // Shared resources"
     echo "  /opt/shared::shared"
     echo "  /data/uploads::uploads"
+    echo ""
+    echo "Notes:"
+    echo "  --keep-original-owner preserves existing directory ownership and adds the FTP user"
+    echo "  to the source directory's group instead of changing ownership. This allows multiple"
+    echo "  FTP users to share access to the same directories while maintaining original permissions."
+    echo "  Group permissions are normalized to match owner permissions when necessary."
     exit 1
 }
 
@@ -314,6 +327,65 @@ validate_mount_config() {
     return 0
 }
 
+# Function to handle source directory permissions (either change ownership or add to group)
+setup_source_directory_permissions() {
+    local source_path="$1"
+    local ftp_user="$2"
+    
+    if [ ! -d "${source_path}" ]; then
+        verbose_log "Source directory does not exist, creating: ${source_path}"
+        execute_or_log "Creating source directory ${source_path}" sudo mkdir -p "${source_path}" || error_exit "Failed to create source directory ${source_path}."
+    fi
+    
+    if [ "${KEEP_ORIGINAL_OWNER}" == "yes" ]; then
+        # Get current owner and group of the source directory
+        local current_owner=$(stat -c '%U' "${source_path}" 2>/dev/null || echo "unknown")
+        local current_group=$(stat -c '%G' "${source_path}" 2>/dev/null || echo "unknown")
+        local current_perms=$(stat -c '%a' "${source_path}" 2>/dev/null || echo "755")
+        
+        verbose_log "Source directory current ownership: ${current_owner}:${current_group} (${current_perms})"
+        
+        if [ "${current_owner}" == "unknown" ] || [ "${current_group}" == "unknown" ]; then
+            log "WARNING: Could not determine current ownership of ${source_path}. Falling back to ownership change."
+            execute_or_log "Setting ownership of source directory ${source_path}" sudo chown -R "${ftp_user}:${ftp_user}" "${source_path}" || log "Warning: Failed to set ownership of ${source_path}. Check manually."
+            execute_or_log "Setting permissions of source directory ${source_path}" sudo chmod -R 775 "${source_path}" || log "Warning: Failed to set permissions of ${source_path}. Check manually."
+            return
+        fi
+        
+        # Check if the FTP user is already in the group
+        if groups "${ftp_user}" 2>/dev/null | grep -q "\b${current_group}\b"; then
+            verbose_log "User ${ftp_user} is already in group ${current_group}"
+        else
+            log "Adding user ${ftp_user} to group ${current_group} for shared access"
+            execute_or_log "Adding user ${ftp_user} to group ${current_group}" sudo usermod -a -G "${current_group}" "${ftp_user}" || log "Warning: Failed to add ${ftp_user} to group ${current_group}. Check manually."
+        fi
+        
+        # Normalize permissions to ensure group has appropriate access
+        # Convert current permissions to ensure group has read/write/execute as needed
+        local owner_perms=$((current_perms / 100))
+        local group_perms=$(((current_perms / 10) % 10))
+        local other_perms=$((current_perms % 10))
+        
+        # Ensure group has at least the same permissions as owner (but not more)
+        if [ ${group_perms} -lt ${owner_perms} ]; then
+            local new_perms="${owner_perms}${owner_perms}${other_perms}"
+            log "Normalizing permissions from ${current_perms} to ${new_perms} for group access"
+            execute_or_log "Normalizing permissions of source directory ${source_path}" sudo chmod -R "${new_perms}" "${source_path}" || log "Warning: Failed to normalize permissions of ${source_path}. Check manually."
+        else
+            verbose_log "Permissions already adequate for group access: ${current_perms}"
+        fi
+        
+        log "Preserved ownership ${current_owner}:${current_group} for ${source_path}, added ${ftp_user} to group"
+        
+    else
+        # Original behavior - change ownership to FTP user
+        verbose_log "Changing ownership of source directory to ${ftp_user}:${ftp_user}"
+        execute_or_log "Setting ownership of source directory ${source_path}" sudo chown -R "${ftp_user}:${ftp_user}" "${source_path}" || log "Warning: Failed to set ownership of ${source_path}. Check manually."
+        execute_or_log "Setting permissions of source directory ${source_path}" sudo chmod -R 775 "${source_path}" || log "Warning: Failed to set permissions of ${source_path}. Check manually."
+        log "Changed ownership to ${ftp_user}:${ftp_user} for ${source_path}"
+    fi
+}
+
 # Function to check mount status and report
 check_mount_status() {
     local mount_pair="$1"
@@ -328,6 +400,21 @@ check_mount_status() {
         log "  ✓ Source directory exists: ${source_path}"
         local source_files=$(find "${source_path}" -maxdepth 1 -type f | wc -l)
         log "  ✓ Source contains ${source_files} files"
+        
+        # Show ownership information in verbose mode
+        if [ "${VERBOSE_MODE}" == "yes" ]; then
+            local owner=$(stat -c '%U' "${source_path}" 2>/dev/null || echo "unknown")
+            local group=$(stat -c '%G' "${source_path}" 2>/dev/null || echo "unknown")
+            local perms=$(stat -c '%a' "${source_path}" 2>/dev/null || echo "unknown")
+            verbose_log "  Source ownership: ${owner}:${group} (${perms})"
+            
+            # Check if FTP user is in the group
+            if groups "${FTP_USER}" 2>/dev/null | grep -q "\b${group}\b"; then
+                verbose_log "  ✓ FTP user ${FTP_USER} is in group ${group}"
+            else
+                verbose_log "  ✗ FTP user ${FTP_USER} is NOT in group ${group}"
+            fi
+        fi
     else
         log "  ✗ Source directory missing: ${source_path}"
         return 1
@@ -500,6 +587,10 @@ parse_arguments() {
                 CHECK_MOUNTS_ONLY="yes"
                 shift
                 ;;
+            --keep-original-owner)
+                KEEP_ORIGINAL_OWNER="yes"
+                shift
+                ;;
             --dry-run)
                 DRY_RUN="yes"
                 shift
@@ -660,10 +751,7 @@ add_mounts_to_existing_user() {
         fi
 
         # Ensure source directory exists and has appropriate permissions
-        execute_or_log "Creating source directory ${SOURCE_PATH}" sudo mkdir -p "${SOURCE_PATH}" || error_exit "Failed to create source directory ${SOURCE_PATH}."
-        execute_or_log "Setting ownership of source directory ${SOURCE_PATH}" sudo chown -R "${FTP_USER}:${FTP_USER}" "${SOURCE_PATH}" || log "Warning: Failed to set ownership of ${SOURCE_PATH}. Check manually."
-        execute_or_log "Setting permissions of source directory ${SOURCE_PATH}" sudo chmod -R 775 "${SOURCE_PATH}" || log "Warning: Failed to set permissions of ${SOURCE_PATH}. Check manually."
-        log "Ensured source directory '${SOURCE_PATH}' exists and permissions set."
+        setup_source_directory_permissions "${SOURCE_PATH}" "${FTP_USER}"
 
         # Perform the bind mount
         execute_or_log "Bind mounting ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}" sudo mount --rbind "${SOURCE_PATH}" "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to bind mount ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}."
@@ -692,12 +780,7 @@ setup_bind_mounts() {
         DEST_DIR_IN_CHROOT="${HOME_DIR}/${DEST_PATH}"
 
         # Ensure source directory exists and has appropriate permissions
-        execute_or_log "Creating source directory ${SOURCE_PATH}" sudo mkdir -p "${SOURCE_PATH}" || error_exit "Failed to create source directory ${SOURCE_PATH}."
-        # Note: Permissions on source dir are crucial for actual file access
-        # Defaulting to ftpuser:ftpuser and 775, but adjust as needed for your specific use case
-        execute_or_log "Setting ownership of source directory ${SOURCE_PATH}" sudo chown -R "${FTP_USER}:${FTP_USER}" "${SOURCE_PATH}" || log "Warning: Failed to set ownership of ${SOURCE_PATH}. Check manually."
-        execute_or_log "Setting permissions of source directory ${SOURCE_PATH}" sudo chmod -R 775 "${SOURCE_PATH}" || log "Warning: Failed to set permissions of ${SOURCE_PATH}. Check manually."
-        log "Ensured source directory '${SOURCE_PATH}' exists and permissions set (may need manual adjustment)."
+        setup_source_directory_permissions "${SOURCE_PATH}" "${FTP_USER}"
 
         # Check if mount already exists
         FSTAB_ENTRY="${SOURCE_PATH} ${DEST_DIR_IN_CHROOT} none rw,rbind 0 0"
@@ -914,6 +997,7 @@ main() {
         log "Add-mounts-only mode enabled for user: '${FTP_USER}'"
         log "Home directory: '${HOME_DIR}'"
         log "New bind mounts to add: ${BIND_MOUNTS[@]}"
+        log "Keep original owner: ${KEEP_ORIGINAL_OWNER}"
         log "Dry run enabled: ${DRY_RUN}"
         echo ""
 
@@ -928,6 +1012,7 @@ main() {
     log "Allow writable chroot: ${ALLOW_WRITEABLE_CHROOT}"
     log "Passive ports: ${PASV_MIN_PORT}-${PASV_MAX_PORT}"
     log "Firewall type: ${FIREWALL_TYPE}"
+    log "Keep original owner: ${KEEP_ORIGINAL_OWNER}"
     log "Dry run enabled: ${DRY_RUN}"
     log "Verbose mode enabled: ${VERBOSE_MODE}"
     echo ""
