@@ -38,6 +38,12 @@ ADD_MOUNTS_ONLY="no"        # Set to 'yes' to only add new mounts to existing us
 # Generate password flag (default: no)
 GENERATE_PASSWORD="no"      # Set to 'yes' to generate and set a temporary password
 
+# Verbose mode flag (default: no)
+VERBOSE_MODE="no"           # Set to 'yes' to enable detailed logging
+
+# Check mounts flag (default: no)
+CHECK_MOUNTS_ONLY="no"      # Set to 'yes' to only check mount status
+
 # --- Script Functions ---
 
 # Function to display usage information
@@ -57,6 +63,8 @@ usage() {
     echo "  -p, --pasv-ports <min:max>     Set passive port range (default: ${PASV_MIN_PORT}:${PASV_MAX_PORT})"
     echo "  --add-mounts-only              Only add new mounts to existing user (skip full setup)"
     echo "  --generate-password            Generate and set a temporary password for the user"
+    echo "  --verbose                      Enable verbose logging and detailed output"
+    echo "  --check-mounts                 Check and report status of existing mounts"
     echo "  --dry-run                      Simulate the execution without making any changes"
     echo "  -h, --help                     Display this help message"
     echo ""
@@ -69,6 +77,12 @@ usage() {
     echo ""
     echo "  # Add new mounts from file to existing user:"
     echo "  sudo $0 -u myftpuser -b /path/to/additional-mounts.txt --add-mounts-only"
+    echo ""
+    echo "  # Check mount status for existing user:"
+    echo "  sudo $0 -u myftpuser -b /path/to/mounts.txt --check-mounts"
+    echo ""
+    echo "  # Verbose setup with detailed logging:"
+    echo "  sudo $0 -u myftpuser -b /path/to/mounts.txt --verbose --generate-password"
     echo ""
     echo "Bind mounts file format example (/path/to/mounts.txt):"
     echo "  # Web directories"
@@ -87,6 +101,17 @@ log() {
         prefix="[DRY RUN] "
     fi
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] ${prefix}$1"
+}
+
+# Function for verbose logging (only shown when verbose mode is enabled)
+verbose_log() {
+    if [ "${VERBOSE_MODE}" == "yes" ]; then
+        local prefix="[VERBOSE] "
+        if [ "${DRY_RUN}" == "yes" ]; then
+            prefix="[DRY RUN VERBOSE] "
+        fi
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] ${prefix}$1"
+    fi
 }
 
 # Function for error handling and exiting (only exits for real runs)
@@ -182,6 +207,41 @@ add_fstab_entry() {
     fi
 }
 
+# Function to remove duplicate fstab entries
+remove_duplicate_fstab_entries() {
+    if [ "${DRY_RUN}" == "yes" ]; then
+        log "DRY RUN: Would remove duplicate fstab entries"
+        return 0
+    fi
+    
+    if [ ! -f "/etc/fstab" ]; then
+        return 0  # File doesn't exist, nothing to clean
+    fi
+    
+    # Create a temporary file to store unique entries
+    local temp_fstab=$(mktemp)
+    
+    # Remove duplicates while preserving order (keeps first occurrence)
+    awk '!seen[$0]++' /etc/fstab > "${temp_fstab}"
+    
+    # Count duplicates removed
+    local original_lines=$(wc -l < /etc/fstab 2>/dev/null || echo "0")
+    local unique_lines=$(wc -l < "${temp_fstab}" 2>/dev/null || echo "0")
+    local duplicates_removed=$((original_lines - unique_lines))
+    
+    if [ ${duplicates_removed} -gt 0 ]; then
+        # Backup original fstab
+        sudo cp /etc/fstab /etc/fstab.backup-duplicates-$(date +%Y%m%d-%H%M%S) 2>/dev/null || true
+        
+        # Replace with deduplicated version
+        sudo cp "${temp_fstab}" /etc/fstab
+        log "Removed ${duplicates_removed} duplicate entries from /etc/fstab (backup created)"
+    fi
+    
+    # Clean up temp file
+    rm -f "${temp_fstab}"
+}
+
 # Function to clean up any accidentally leaked log timestamps from /etc/fstab
 clean_fstab_timestamps() {
     if [ "${DRY_RUN}" == "yes" ]; then
@@ -215,6 +275,92 @@ clean_fstab_timestamps() {
     if [ ${lines_removed} -gt 0 ]; then
         log "Cleaned ${lines_removed} contaminated entries from /etc/fstab (backup created)"
     fi
+}
+
+# Function to validate mount configuration
+validate_mount_config() {
+    local mount_pair="$1"
+    local source_path="${mount_pair%%::*}"
+    local dest_path="${mount_pair##*::}"
+    
+    # Validate source path
+    if [[ ! "$source_path" =~ ^/ ]]; then
+        log "ERROR: Source path must be absolute: ${source_path}"
+        return 1
+    fi
+    
+    # Validate destination path (should be relative)
+    if [[ "$dest_path" =~ ^/ ]]; then
+        log "WARNING: Destination path should be relative to chroot: ${dest_path}"
+        dest_path="${dest_path#/}"
+        log "Converting to relative path: ${dest_path}"
+    fi
+    
+    # Check if source path exists or can be created
+    if [ ! -d "${source_path}" ]; then
+        if [ "${DRY_RUN}" == "no" ]; then
+            log "WARNING: Source directory does not exist and will be created: ${source_path}"
+        else
+            log "DRY RUN: Source directory would be created: ${source_path}"
+        fi
+    fi
+    
+    # Validate destination path doesn't contain dangerous characters
+    if [[ "$dest_path" =~ \.\. ]] || [[ "$dest_path" =~ ^/ ]]; then
+        log "ERROR: Destination path contains dangerous characters: ${dest_path}"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Function to check mount status and report
+check_mount_status() {
+    local mount_pair="$1"
+    local source_path="${mount_pair%%::*}"
+    local dest_path="${mount_pair##*::}"
+    local dest_dir_in_chroot="${HOME_DIR}/${dest_path}"
+    
+    log "Checking mount status for: ${source_path} -> ${dest_path}"
+    
+    # Check if source exists
+    if [ -d "${source_path}" ]; then
+        log "  ✓ Source directory exists: ${source_path}"
+        local source_files=$(find "${source_path}" -maxdepth 1 -type f | wc -l)
+        log "  ✓ Source contains ${source_files} files"
+    else
+        log "  ✗ Source directory missing: ${source_path}"
+        return 1
+    fi
+    
+    # Check if destination exists
+    if [ -d "${dest_dir_in_chroot}" ]; then
+        log "  ✓ Destination directory exists: ${dest_dir_in_chroot}"
+    else
+        log "  ✗ Destination directory missing: ${dest_dir_in_chroot}"
+        return 1
+    fi
+    
+    # Check if mount is active
+    if mountpoint -q "${dest_dir_in_chroot}"; then
+        log "  ✓ Mount is active"
+        local dest_files=$(find "${dest_dir_in_chroot}" -maxdepth 1 -type f 2>/dev/null | wc -l)
+        log "  ✓ Mounted directory contains ${dest_files} files"
+    else
+        log "  ✗ Mount is not active"
+        return 1
+    fi
+    
+    # Check fstab entry
+    local fstab_entry="${source_path} ${dest_dir_in_chroot} none rw,rbind 0 0"
+    if grep -Fxq "${fstab_entry}" /etc/fstab 2>/dev/null; then
+        log "  ✓ Fstab entry exists"
+    else
+        log "  ✗ Fstab entry missing"
+        return 1
+    fi
+    
+    return 0
 }
 
 # Function to parse bind mounts from a file
@@ -346,6 +492,14 @@ parse_arguments() {
                 GENERATE_PASSWORD="yes"
                 shift
                 ;;
+            --verbose)
+                VERBOSE_MODE="yes"
+                shift
+                ;;
+            --check-mounts)
+                CHECK_MOUNTS_ONLY="yes"
+                shift
+                ;;
             --dry-run)
                 DRY_RUN="yes"
                 shift
@@ -415,6 +569,13 @@ create_user_and_dirs() {
 
     # Create destination directories for bind mounts and set ownership
     for mount_pair in "${BIND_MOUNTS[@]}"; do
+        # Validate mount configuration
+        if ! validate_mount_config "${mount_pair}"; then
+            error_exit "Invalid mount configuration: ${mount_pair}"
+        fi
+        
+        verbose_log "Processing mount pair: ${mount_pair}"
+        
         # Extract destination path - Assuming format "SOURCE::DEST"
         # Using string manipulation to get the part after the first "::"
         DEST_PATH="${mount_pair##*::}"
@@ -445,6 +606,13 @@ add_mounts_to_existing_user() {
 
     # Create destination directories for new bind mounts
     for mount_pair in "${BIND_MOUNTS[@]}"; do
+        # Validate mount configuration
+        if ! validate_mount_config "${mount_pair}"; then
+            error_exit "Invalid mount configuration: ${mount_pair}"
+        fi
+        
+        verbose_log "Processing new mount pair: ${mount_pair}"
+        
         DEST_PATH="${mount_pair##*::}"
         DEST_DIR_IN_CHROOT="${HOME_DIR}/${DEST_PATH}"
 
@@ -498,7 +666,7 @@ add_mounts_to_existing_user() {
         log "Ensured source directory '${SOURCE_PATH}' exists and permissions set."
 
         # Perform the bind mount
-        execute_or_log "Bind mounting ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}" mount --rbind "${SOURCE_PATH}" "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to bind mount ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}."
+        execute_or_log "Bind mounting ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}" sudo mount --rbind "${SOURCE_PATH}" "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to bind mount ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}."
         log "Bind mounted '${SOURCE_PATH}' to '${DEST_DIR_IN_CHROOT}'."
         
     done
@@ -511,6 +679,13 @@ setup_bind_mounts() {
     log "2. Setting up source directories and bind mounts..."
 
     for mount_pair in "${BIND_MOUNTS[@]}"; do
+        # Validate mount configuration
+        if ! validate_mount_config "${mount_pair}"; then
+            error_exit "Invalid mount configuration: ${mount_pair}"
+        fi
+        
+        verbose_log "Setting up bind mount: ${mount_pair}"
+        
         # Extract source and destination paths
         SOURCE_PATH="${mount_pair%%::*}" # Get part before "::"
         DEST_PATH="${mount_pair##*::}"   # Get part after "::"
@@ -535,7 +710,7 @@ setup_bind_mounts() {
 
         # Perform the bind mount
         if ! mountpoint -q "${DEST_DIR_IN_CHROOT}"; then
-            execute_or_log "Bind mounting ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}" mount --rbind "${SOURCE_PATH}" "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to bind mount ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}."
+            execute_or_log "Bind mounting ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}" sudo mount --rbind "${SOURCE_PATH}" "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to bind mount ${SOURCE_PATH} to ${DEST_DIR_IN_CHROOT}."
             log "Bind mounted '${SOURCE_PATH}' to '${DEST_DIR_IN_CHROOT}'."
         else
             log "Mount point '${DEST_DIR_IN_CHROOT}' is already mounted. Skipping."
@@ -696,16 +871,43 @@ setup_firewall() {
 
 # Main function to orchestrate the setup
 main() {
-    # Check for root privileges
+    # Parse command-line arguments first (to handle --help without root check)
+    parse_arguments "$@"
+    
+    # Check for root privileges (skip for help)
     if [[ $EUID -ne 0 ]]; then
         error_exit "This script must be run as root. Please use sudo."
     fi
 
-    # Parse command-line arguments
-    parse_arguments "$@"
-
     # Clean up any existing fstab contamination from previous runs
     clean_fstab_timestamps
+    
+    # Remove duplicate fstab entries
+    remove_duplicate_fstab_entries
+
+    # Handle check-mounts-only mode
+    if [ "${CHECK_MOUNTS_ONLY}" == "yes" ]; then
+        log "Mount status check mode enabled for user: '${FTP_USER}'"
+        log "Home directory: '${HOME_DIR}'"
+        log "Checking ${#BIND_MOUNTS[@]} bind mount(s)..."
+        echo ""
+        
+        local failed_mounts=0
+        for mount_pair in "${BIND_MOUNTS[@]}"; do
+            if ! check_mount_status "${mount_pair}"; then
+                failed_mounts=$((failed_mounts + 1))
+            fi
+            echo ""
+        done
+        
+        if [ ${failed_mounts} -eq 0 ]; then
+            log "✓ All ${#BIND_MOUNTS[@]} mount(s) are healthy!"
+        else
+            log "✗ ${failed_mounts} out of ${#BIND_MOUNTS[@]} mount(s) have issues."
+            exit 1
+        fi
+        return 0
+    fi
 
     # Handle add-mounts-only mode
     if [ "${ADD_MOUNTS_ONLY}" == "yes" ]; then
@@ -727,7 +929,20 @@ main() {
     log "Passive ports: ${PASV_MIN_PORT}-${PASV_MAX_PORT}"
     log "Firewall type: ${FIREWALL_TYPE}"
     log "Dry run enabled: ${DRY_RUN}"
+    log "Verbose mode enabled: ${VERBOSE_MODE}"
     echo ""
+    
+    # Validate configuration
+    verbose_log "Validating configuration..."
+    if [ ${PASV_MIN_PORT} -ge ${PASV_MAX_PORT} ]; then
+        error_exit "Invalid passive port range: ${PASV_MIN_PORT}-${PASV_MAX_PORT} (min must be less than max)"
+    fi
+    
+    if [ ${PASV_MIN_PORT} -lt 1024 ] || [ ${PASV_MAX_PORT} -gt 65535 ]; then
+        error_exit "Passive ports must be between 1024 and 65535"
+    fi
+    
+    verbose_log "Configuration validation passed"
 
     # Ensure vsftpd is installed
     if ! command_exists vsftpd; then
@@ -780,8 +995,36 @@ main() {
         log "Remember to set a password for the user if you haven't already: 'sudo passwd ${FTP_USER}'"
     fi
     
+    # Final mount status check if verbose mode is enabled
+    if [ "${VERBOSE_MODE}" == "yes" ] && [ "${DRY_RUN}" == "no" ]; then
+        echo ""
+        log "Final mount status verification:"
+        local failed_final=0
+        for mount_pair in "${BIND_MOUNTS[@]}"; do
+            if ! check_mount_status "${mount_pair}"; then
+                failed_final=$((failed_final + 1))
+            fi
+        done
+        
+        if [ ${failed_final} -eq 0 ]; then
+            log "✓ All ${#BIND_MOUNTS[@]} mount(s) are operational!"
+        else
+            log "⚠ ${failed_final} out of ${#BIND_MOUNTS[@]} mount(s) may have issues. Use --check-mounts for detailed analysis."
+        fi
+    fi
+    
+    echo ""
+    log "=== SETUP SUMMARY ==="
+    log "User: ${FTP_USER}"
+    log "Home: ${HOME_DIR}"
+    log "Mounts configured: ${#BIND_MOUNTS[@]}"
+    log "Firewall: ${FIREWALL_TYPE}"
+    log "Passive ports: ${PASV_MIN_PORT}-${PASV_MAX_PORT}"
+    echo ""
+    
     log "If you encounter issues, check vsftpd logs: 'journalctl -u vsftpd' or 'tail -f /var/log/vsftpd.log'"
     log "Also check system authentication logs: 'tail -f /var/log/auth.log'"
+    log "Use '--check-mounts' flag to verify mount status anytime"
 }
 
 # Execute the main function
