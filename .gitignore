@@ -1,2 +1,3 @@
 scripts/utils/*.json
 scripts/server/process-cancellations/*.json
+scripts/server/process-backups/*.json
