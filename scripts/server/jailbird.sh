@@ -38,14 +38,34 @@ ADD_MOUNTS_ONLY="no"        # Set to 'yes' to only add new mounts to existing us
 # Generate password flag (default: no)
 GENERATE_PASSWORD="no"      # Set to 'yes' to generate and set a temporary password
 
+# Set password flag and value (default: no password set)
+SET_PASSWORD="no"           # Set to 'yes' to use a specified password
+USER_PASSWORD=""            # The password to set for the user
+
 # Verbose mode flag (default: no)
 VERBOSE_MODE="no"           # Set to 'yes' to enable detailed logging
 
 # Check mounts flag (default: no)
 CHECK_MOUNTS_ONLY="no"      # Set to 'yes' to only check mount status
 
+# Prep mount bindings flag (default: no)
+PREP_MOUNT_BINDINGS="no"    # Set to 'yes' to prepare mount bindings from directory listing
+
+# Process mount bindings flag (default: no)
+PROCESS_MOUNT_BINDINGS="no" # Set to 'yes' to process mount bindings directly without creating file
+
+# Prefer TLD directories flag (default: no)
+PREFER_TLD_DIRS="no"        # Set to 'yes' to filter only directories that look like domain names
+
 # Keep original owner flag (default: no)
 KEEP_ORIGINAL_OWNER="no"    # Set to 'yes' to preserve source directory ownership
+
+# Permission management flags
+NORMALIZE_PERMS="no"        # Set to 'yes' to normalize group permissions to match owner
+SET_PERMS_FOR_USER="no"     # Set to 'yes' to set specific permissions for user directories
+USER_PERMS=""               # The permissions value to set for user directories
+SET_PERMS="no"              # Set to 'yes' to set permissions for both source and user directories
+ALL_PERMS=""                # The permissions value to set for both source and user directories
 
 # --- Script Functions ---
 
@@ -66,9 +86,16 @@ usage() {
     echo "  -p, --pasv-ports <min:max>     Set passive port range (default: ${PASV_MIN_PORT}:${PASV_MAX_PORT})"
     echo "  --add-mounts-only              Only add new mounts to existing user (skip full setup)"
     echo "  --generate-password            Generate and set a temporary password for the user"
+    echo "  --set-password <password>      Set a specific password for the user"
     echo "  --verbose                      Enable verbose logging and detailed output"
     echo "  --check-mounts                 Check and report status of existing mounts"
+    echo "  --prep-mount-bindings [dir]    Process directories and create mount bindings file"
+    echo "  --process-mount-bindings [dir] Process directories and set up mounts directly (no file)"
+    echo "  --prefer-tld-dirs              Filter only directories that look like domain names with TLDs"
     echo "  --keep-original-owner          Preserve source directory ownership, add FTP user to group"
+    echo "  --normalize-perms              Normalize group permissions to match owner permissions"
+    echo "  --set-perms-for-user <perms>   Set specific permissions for user directories (e.g., 755)"
+    echo "  --set-perms <perms>            Set permissions for both source and user directories"
     echo "  --dry-run                      Simulate the execution without making any changes"
     echo "  -h, --help                     Display this help message"
     echo ""
@@ -85,11 +112,33 @@ usage() {
     echo "  # Check mount status for existing user:"
     echo "  sudo $0 -u myftpuser -b /path/to/mounts.txt --check-mounts"
     echo ""
+    echo "  # Prepare mount bindings from directory listing:"
+    echo "  sudo $0 --prep-mount-bindings /var/www"
+    echo "  sudo $0 --prep-mount-bindings  # (uses current directory)"
+    echo "  sudo $0 --prep-mount-bindings /var/www --prefer-tld-dirs  # (filter domain-like dirs)"
+    echo ""
+    echo "  # Process mount bindings directly without creating file:"
+    echo "  sudo $0 -u myftpuser --process-mount-bindings /var/www"
+    echo "  sudo $0 -u myftpuser --process-mount-bindings /var/www --prefer-tld-dirs"
+    echo "  sudo $0 -u myftpuser --process-mount-bindings /var/www --set-password 'SecurePass123'"
+    echo ""
     echo "  # Verbose setup with detailed logging:"
     echo "  sudo $0 -u myftpuser -b /path/to/mounts.txt --verbose --generate-password"
     echo ""
+    echo "  # Set a specific password for the user:"
+    echo "  sudo $0 -u myftpuser -b /path/to/mounts.txt --set-password 'MySecurePassword123'"
+    echo ""
     echo "  # Preserve original ownership and add FTP user to existing groups:"
     echo "  sudo $0 -u myftpuser -b /path/to/mounts.txt --keep-original-owner"
+    echo ""
+    echo "  # Set specific permissions for user directories:"
+    echo "  sudo $0 -u myftpuser -b /path/to/mounts.txt --set-perms-for-user 755"
+    echo ""
+    echo "  # Set permissions for both source and user directories:"
+    echo "  sudo $0 -u myftpuser -b /path/to/mounts.txt --set-perms 775"
+    echo ""
+    echo "  # Normalize permissions with original owner preservation:"
+    echo "  sudo $0 -u myftpuser -b /path/to/mounts.txt --keep-original-owner --normalize-perms"
     echo ""
     echo "Bind mounts file format example (/path/to/mounts.txt):"
     echo "  # Web directories"
@@ -104,6 +153,33 @@ usage() {
     echo "  to the source directory's group instead of changing ownership. This allows multiple"
     echo "  FTP users to share access to the same directories while maintaining original permissions."
     echo "  Group permissions are normalized to match owner permissions when necessary."
+    echo ""
+    echo "  --prep-mount-bindings scans a directory for subdirectories and creates a mount"
+    echo "  bindings file. Each subdirectory is formatted as 'absolute_path::sites/dirname'."
+    echo "  If no directory is specified, the current working directory is used. The output"
+    echo "  file is timestamped and can be used directly with the --bind-mounts option."
+    echo ""
+    echo "  --process-mount-bindings combines directory scanning with full FTP setup in one"
+    echo "  command. It scans the specified directory for subdirectories and automatically"
+    echo "  sets up bind mounts without creating an intermediate file. This streamlines the"
+    echo "  workflow by eliminating the two-step process of prep + setup."
+    echo ""
+    echo "  --prefer-tld-dirs filters directories to only include those that look like domain"
+    echo "  names with recognized TLDs (traditional, country code, and modern generic TLDs)."
+    echo "  This is useful for web hosting environments where directories are named after domains."
+    echo "  Examples: example.com, mysite.org, business.tech, company.co.uk would be included."
+    echo ""
+    echo "  Password options: Use --generate-password for a secure random password, or"
+    echo "  --set-password to specify your own. These options are mutually exclusive."
+    echo "  If neither is used, you must set a password manually with 'sudo passwd username'."
+    echo "  For security, consider using strong passwords with mixed case, numbers, and symbols."
+    echo ""
+    echo "  Permission options:"
+    echo "  --normalize-perms only applies when --keep-original-owner is used. It ensures"
+    echo "  group permissions match owner permissions for shared access."
+    echo "  --set-perms-for-user sets permissions only on user directories (home, uploads, bind destinations)."
+    echo "  --set-perms sets permissions on both source directories and user directories."
+    echo "  These permission flags are mutually exclusive with automatic permission handling."
     exit 1
 }
 
@@ -337,6 +413,42 @@ setup_source_directory_permissions() {
         execute_or_log "Creating source directory ${source_path}" sudo mkdir -p "${source_path}" || error_exit "Failed to create source directory ${source_path}."
     fi
     
+    # Handle --set-perms flag (affects both source and user directories)
+    if [ "${SET_PERMS}" == "yes" ]; then
+        verbose_log "Setting permissions to ${ALL_PERMS} for source directory: ${source_path}"
+        execute_or_log "Setting permissions of source directory ${source_path} to ${ALL_PERMS}" sudo chmod -R "${ALL_PERMS}" "${source_path}" || log "Warning: Failed to set permissions of ${source_path}. Check manually."
+        
+        # For --set-perms, we still need to handle ownership
+        if [ "${KEEP_ORIGINAL_OWNER}" == "yes" ]; then
+            # Get current owner and group of the source directory
+            local current_owner=$(stat -c '%U' "${source_path}" 2>/dev/null || echo "unknown")
+            local current_group=$(stat -c '%G' "${source_path}" 2>/dev/null || echo "unknown")
+            
+            verbose_log "Source directory current ownership: ${current_owner}:${current_group}"
+            
+            if [ "${current_owner}" == "unknown" ] || [ "${current_group}" == "unknown" ]; then
+                log "WARNING: Could not determine current ownership of ${source_path}. Falling back to ownership change."
+                execute_or_log "Setting ownership of source directory ${source_path}" sudo chown -R "${ftp_user}:${ftp_user}" "${source_path}" || log "Warning: Failed to set ownership of ${source_path}. Check manually."
+            else
+                # Check if the FTP user is already in the group
+                if groups "${ftp_user}" 2>/dev/null | grep -q "\b${current_group}\b"; then
+                    verbose_log "User ${ftp_user} is already in group ${current_group}"
+                else
+                    log "Adding user ${ftp_user} to group ${current_group} for shared access"
+                    execute_or_log "Adding user ${ftp_user} to group ${current_group}" sudo usermod -a -G "${current_group}" "${ftp_user}" || log "Warning: Failed to add ${ftp_user} to group ${current_group}. Check manually."
+                fi
+                log "Preserved ownership ${current_owner}:${current_group} for ${source_path}, added ${ftp_user} to group"
+            fi
+        else
+            # Change ownership to FTP user
+            execute_or_log "Setting ownership of source directory ${source_path}" sudo chown -R "${ftp_user}:${ftp_user}" "${source_path}" || log "Warning: Failed to set ownership of ${source_path}. Check manually."
+            log "Changed ownership to ${ftp_user}:${ftp_user} for ${source_path}"
+        fi
+        
+        log "Set permissions to ${ALL_PERMS} for ${source_path}"
+        return
+    fi
+    
     if [ "${KEEP_ORIGINAL_OWNER}" == "yes" ]; then
         # Get current owner and group of the source directory
         local current_owner=$(stat -c '%U' "${source_path}" 2>/dev/null || echo "unknown")
@@ -360,19 +472,23 @@ setup_source_directory_permissions() {
             execute_or_log "Adding user ${ftp_user} to group ${current_group}" sudo usermod -a -G "${current_group}" "${ftp_user}" || log "Warning: Failed to add ${ftp_user} to group ${current_group}. Check manually."
         fi
         
-        # Normalize permissions to ensure group has appropriate access
-        # Convert current permissions to ensure group has read/write/execute as needed
-        local owner_perms=$((current_perms / 100))
-        local group_perms=$(((current_perms / 10) % 10))
-        local other_perms=$((current_perms % 10))
-        
-        # Ensure group has at least the same permissions as owner (but not more)
-        if [ ${group_perms} -lt ${owner_perms} ]; then
-            local new_perms="${owner_perms}${owner_perms}${other_perms}"
-            log "Normalizing permissions from ${current_perms} to ${new_perms} for group access"
-            execute_or_log "Normalizing permissions of source directory ${source_path}" sudo chmod -R "${new_perms}" "${source_path}" || log "Warning: Failed to normalize permissions of ${source_path}. Check manually."
+        # Normalize permissions if --normalize-perms flag is set
+        if [ "${NORMALIZE_PERMS}" == "yes" ]; then
+            # Convert current permissions to ensure group has read/write/execute as needed
+            local owner_perms=$((current_perms / 100))
+            local group_perms=$(((current_perms / 10) % 10))
+            local other_perms=$((current_perms % 10))
+            
+            # Ensure group has at least the same permissions as owner (but not more)
+            if [ ${group_perms} -lt ${owner_perms} ]; then
+                local new_perms="${owner_perms}${owner_perms}${other_perms}"
+                log "Normalizing permissions from ${current_perms} to ${new_perms} for group access"
+                execute_or_log "Normalizing permissions of source directory ${source_path}" sudo chmod -R "${new_perms}" "${source_path}" || log "Warning: Failed to normalize permissions of ${source_path}. Check manually."
+            else
+                verbose_log "Permissions already adequate for group access: ${current_perms}"
+            fi
         else
-            verbose_log "Permissions already adequate for group access: ${current_perms}"
+            verbose_log "Permission normalization skipped (--normalize-perms not specified)"
         fi
         
         log "Preserved ownership ${current_owner}:${current_group} for ${source_path}, added ${ftp_user} to group"
@@ -384,6 +500,414 @@ setup_source_directory_permissions() {
         execute_or_log "Setting permissions of source directory ${source_path}" sudo chmod -R 775 "${source_path}" || log "Warning: Failed to set permissions of ${source_path}. Check manually."
         log "Changed ownership to ${ftp_user}:${ftp_user} for ${source_path}"
     fi
+}
+
+# Function to check if a directory name looks like a domain name with TLD
+is_domain_like() {
+    local dirname="$1"
+    
+    # Convert to lowercase for case-insensitive matching
+    local lowercase_dirname=$(echo "$dirname" | tr '[:upper:]' '[:lower:]')
+    
+    # Comprehensive list of TLDs (traditional, country code, and modern generic TLDs)
+    local tlds=(
+        # Traditional TLDs
+        "com" "org" "net" "edu" "gov" "mil" "int" "info" "biz" "name" "pro" "aero" "coop" "museum"
+        
+        # Country code TLDs (major ones)
+        "us" "uk" "ca" "au" "de" "fr" "it" "jp" "cn" "ru" "br" "mx" "in" "es" "nl" "ch" "se" "no" "dk" "fi"
+        "be" "at" "pl" "ie" "pt" "gr" "cz" "hu" "sk" "si" "bg" "ro" "hr" "rs" "ba" "mk" "al" "me" "md"
+        "ua" "by" "lt" "lv" "ee" "is" "mt" "cy" "lu" "li" "ad" "mc" "sm" "va" "gi" "im" "je" "gg"
+        "za" "eg" "ma" "ng" "ke" "gh" "tz" "ug" "rw" "mw" "zm" "zw" "bw" "na" "sz" "ls" "mg" "mu"
+        "kr" "tw" "hk" "sg" "my" "th" "ph" "id" "vn" "bd" "pk" "lk" "np" "mm" "kh" "la" "bn" "mv"
+        "ar" "cl" "pe" "co" "ve" "uy" "py" "bo" "ec" "gf" "sr" "gy" "fk" "cr" "gt" "hn" "ni" "pa"
+        "cu" "do" "ht" "jm" "tt" "bb" "gd" "lc" "vc" "ag" "dm" "kn" "ms" "ai" "vg" "vi" "pr" "bz"
+        "nz" "fj" "pg" "sb" "vu" "nc" "pf" "ws" "to" "tv" "ki" "nr" "pw" "fm" "mh" "mp" "gu" "as"
+        
+        # Modern generic TLDs
+        "app" "dev" "io" "ai" "tech" "blog" "shop" "store" "online" "site" "website" "web" "digital"
+        "cloud" "host" "domains" "email" "click" "link" "download" "zip" "mov" "new" "art" "design"
+        "studio" "agency" "company" "business" "services" "solutions" "consulting" "management" "group"
+        "team" "work" "jobs" "career" "professional" "expert" "guru" "ninja" "rocks" "cool" "fun"
+        "game" "games" "play" "sport" "fitness" "health" "medical" "dental" "clinic" "hospital"
+        "law" "legal" "attorney" "lawyer" "accountant" "tax" "finance" "bank" "money" "insurance"
+        "loan" "credit" "investment" "trading" "forex" "crypto" "bitcoin" "blockchain" "nft"
+        "education" "academy" "school" "college" "university" "training" "course" "learn" "study"
+        "news" "media" "tv" "radio" "music" "video" "photo" "gallery" "movie" "film" "theater"
+        "book" "library" "author" "writer" "publisher" "magazine" "journal" "review" "blog"
+        "food" "restaurant" "cafe" "bar" "pub" "wine" "beer" "pizza" "kitchen" "recipe" "cooking"
+        "travel" "hotel" "flights" "vacation" "holiday" "tour" "cruise" "adventure" "camping"
+        "fashion" "clothing" "shoes" "jewelry" "beauty" "cosmetics" "salon" "spa" "wellness"
+        "auto" "car" "cars" "truck" "motorcycle" "bike" "parts" "repair" "garage" "dealer"
+        "house" "home" "real" "estate" "property" "apartment" "rent" "buy" "sell" "mortgage"
+        "garden" "flowers" "plants" "landscaping" "construction" "tools" "equipment" "supplies"
+        "pet" "pets" "dog" "cat" "animal" "vet" "veterinary" "grooming" "breeding" "training"
+        "baby" "kids" "children" "toys" "games" "family" "mom" "dad" "parenting" "pregnancy"
+        "senior" "retirement" "pension" "insurance" "life" "death" "funeral" "memorial"
+        "charity" "foundation" "nonprofit" "volunteer" "community" "social" "environment"
+        "green" "eco" "solar" "energy" "power" "electric" "gas" "oil" "mining" "metals"
+        "science" "research" "lab" "laboratory" "chemistry" "physics" "biology" "medicine"
+        "technology" "software" "hardware" "computer" "internet" "wireless" "mobile" "phone"
+        "security" "safety" "protection" "guard" "alarm" "camera" "surveillance" "monitoring"
+        "cleaning" "maintenance" "repair" "service" "support" "help" "customer" "client"
+        "marketing" "advertising" "promotion" "sales" "commerce" "trade" "export" "import"
+        "logistics" "shipping" "delivery" "transport" "freight" "cargo" "warehouse" "storage"
+        "manufacturing" "factory" "production" "industrial" "machinery" "equipment" "tools"
+        "agriculture" "farming" "livestock" "crops" "seeds" "fertilizer" "organic" "natural"
+        "fishing" "marine" "ocean" "sea" "water" "river" "lake" "beach" "island" "coast"
+        "mountain" "ski" "snow" "winter" "summer" "spring" "fall" "weather" "climate"
+        "city" "town" "village" "county" "state" "country" "region" "local" "global" "international"
+        "xxx" "adult" "sex" "dating" "singles" "romance" "love" "wedding" "marriage" "divorce"
+    )
+    
+    # Check if dirname ends with any of the TLDs
+    for tld in "${tlds[@]}"; do
+        # Check if dirname ends with .tld (with dot)
+        if [[ "$lowercase_dirname" =~ \.$tld$ ]]; then
+            verbose_log "Directory '$dirname' matches TLD pattern (.$tld)"
+            return 0
+        fi
+        # Also check if dirname ends with just the tld (without dot)
+        if [[ "$lowercase_dirname" =~ ^.*[^a-zA-Z0-9]$tld$ ]] || [[ "$lowercase_dirname" == *"$tld" ]]; then
+            # Make sure it's not just a substring match - require word boundary
+            if [[ "$lowercase_dirname" =~ (^|[^a-zA-Z0-9])$tld$ ]]; then
+                verbose_log "Directory '$dirname' matches TLD pattern ($tld)"
+                return 0
+            fi
+        fi
+    done
+    
+    # Additional check for domain-like patterns (at least one dot and valid characters)
+    if [[ "$lowercase_dirname" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}$ ]]; then
+        verbose_log "Directory '$dirname' matches generic domain pattern"
+        return 0
+    fi
+    
+    verbose_log "Directory '$dirname' does not match any domain pattern"
+    return 1
+}
+
+# Function to process mount bindings directly without creating file
+process_mount_bindings() {
+    local target_dir="$1"
+    local ftp_user="$2"
+    local home_dir="$3"
+    
+    log "Processing mount bindings directly from directory: ${target_dir}"
+    log "FTP user: ${ftp_user}"
+    log "Home directory: ${home_dir}"
+    
+    # Validate target directory
+    if [ ! -d "${target_dir}" ]; then
+        error_exit "Target directory does not exist: ${target_dir}"
+    fi
+    
+    # Convert target directory to absolute path
+    local abs_target_dir
+    if command_exists realpath; then
+        abs_target_dir=$(realpath "${target_dir}")
+    else
+        # Fallback for systems without realpath
+        abs_target_dir=$(cd "${target_dir}" && pwd)
+    fi
+    
+    verbose_log "Target directory (absolute): ${abs_target_dir}"
+    
+    # Tracking variables
+    local binding_count=0
+    local processed_mounts=()
+    
+    log "Scanning directories in: ${abs_target_dir}"
+    
+    # Log TLD filtering status
+    if [ "${PREFER_TLD_DIRS}" == "yes" ]; then
+        log "TLD filtering is enabled - only domain-like directories will be processed"
+    fi
+    
+    # Note: For dry run, we still need to scan directories to show what would be processed
+    # We just won't perform the actual mount operations later
+    
+    # List directories and process them using find
+    while IFS= read -r -d '' dir; do
+        # Get absolute path of the directory
+        local abs_dir
+        if command_exists realpath; then
+            abs_dir=$(realpath "${dir}")
+        else
+            abs_dir=$(cd "${dir}" && pwd)
+        fi
+        
+        # Get basename for the destination
+        local basename=$(basename "${abs_dir}")
+        
+        # Skip if directory name is empty or contains problematic characters
+        if [[ -z "${basename}" ]] || [[ "${basename}" =~ [[:space:]] ]] || [[ "${basename}" =~ \.\. ]]; then
+            if [ "${DRY_RUN}" == "yes" ]; then
+                log "DRY RUN: Would skip directory with problematic name: ${basename}"
+            else
+                log "Warning: Skipping directory with problematic name: ${basename}"
+            fi
+            continue
+        fi
+        
+        # Apply TLD filtering if --prefer-tld-dirs is enabled
+        if [ "${PREFER_TLD_DIRS}" == "yes" ]; then
+            if ! is_domain_like "${basename}"; then
+                if [ "${DRY_RUN}" == "yes" ]; then
+                    log "DRY RUN: Would skip directory '${basename}' (does not match domain pattern)"
+                else
+                    verbose_log "Skipping directory '${basename}' (does not match domain pattern)"
+                fi
+                continue
+            fi
+        fi
+        
+        # Format as source::sites/destination
+        local mount_binding="${abs_dir}::sites/${basename}"
+        processed_mounts+=("${mount_binding}")
+        binding_count=$((binding_count + 1))
+        
+        if [ "${DRY_RUN}" == "yes" ]; then
+            log "DRY RUN: Would process directory '${basename}' -> '${mount_binding}'"
+        else
+            verbose_log "Found binding: ${mount_binding}"
+        fi
+        
+    done < <(find "${abs_target_dir}" -maxdepth 1 -type d ! -path "${abs_target_dir}" -print0 2>/dev/null)
+    
+    # If no directories found, try a different approach
+    if [ ${binding_count} -eq 0 ]; then
+        log "No subdirectories found using find. Trying ls approach..."
+        
+        # Use ls -d with glob pattern
+        for dir in "${abs_target_dir}"/*/; do
+            # Check if glob pattern matched any directories
+            if [ -d "${dir}" ]; then
+                local abs_dir
+                if command_exists realpath; then
+                    abs_dir=$(realpath "${dir}")
+                else
+                    abs_dir=$(cd "${dir}" && pwd)
+                fi
+                
+                local basename=$(basename "${abs_dir}")
+                
+                # Skip if directory name contains problematic characters
+                if [[ -z "${basename}" ]] || [[ "${basename}" =~ [[:space:]] ]] || [[ "${basename}" =~ \.\. ]]; then
+                    if [ "${DRY_RUN}" == "yes" ]; then
+                        log "DRY RUN: Would skip directory with problematic name: ${basename}"
+                    else
+                        log "Warning: Skipping directory with problematic name: ${basename}"
+                    fi
+                    continue
+                fi
+                
+                # Apply TLD filtering if --prefer-tld-dirs is enabled
+                if [ "${PREFER_TLD_DIRS}" == "yes" ]; then
+                    if ! is_domain_like "${basename}"; then
+                        if [ "${DRY_RUN}" == "yes" ]; then
+                            log "DRY RUN: Would skip directory '${basename}' (does not match domain pattern)"
+                        else
+                            verbose_log "Skipping directory '${basename}' (does not match domain pattern)"
+                        fi
+                        continue
+                    fi
+                fi
+                
+                local mount_binding="${abs_dir}::sites/${basename}"
+                processed_mounts+=("${mount_binding}")
+                binding_count=$((binding_count + 1))
+                
+                if [ "${DRY_RUN}" == "yes" ]; then
+                    log "DRY RUN: Would process directory '${basename}' -> '${mount_binding}'"
+                else
+                    verbose_log "Found binding: ${mount_binding}"
+                fi
+            fi
+        done
+    fi
+    
+    if [ ${binding_count} -eq 0 ]; then
+        log "Warning: No directories found in ${abs_target_dir}"
+        return 1
+    fi
+    
+    if [ "${DRY_RUN}" == "yes" ]; then
+        log "DRY RUN: Found ${binding_count} directories that would be processed as mount bindings"
+    else
+        log "Found ${binding_count} directories to process as mount bindings"
+    fi
+    
+    # Set the global BIND_MOUNTS array to our processed mounts
+    BIND_MOUNTS=("${processed_mounts[@]}")
+    
+    # Display the processed mounts if verbose mode is enabled OR if dry run mode is enabled
+    if [ "${VERBOSE_MODE}" == "yes" ] || [ "${DRY_RUN}" == "yes" ]; then
+        if [ "${DRY_RUN}" == "yes" ]; then
+            log "DRY RUN: Mount bindings that would be processed:"
+        else
+            log "Processed mount bindings:"
+        fi
+        for mount_binding in "${BIND_MOUNTS[@]}"; do
+            log "  ${mount_binding}"
+        done
+    fi
+    
+    if [ "${DRY_RUN}" == "yes" ]; then
+        log "DRY RUN: Would process ${#BIND_MOUNTS[@]} mount binding(s) for direct setup"
+    else
+        log "Successfully processed ${#BIND_MOUNTS[@]} mount binding(s) for direct setup"
+    fi
+    return 0
+}
+
+# Function to prepare mount bindings from directory listing
+prep_mount_bindings() {
+    local target_dir="$1"
+    local output_file="${2:-mount_bindings.txt}"
+    
+    log "Preparing mount bindings from directory: ${target_dir}"
+    log "Output file: ${output_file}"
+    
+    # Validate target directory
+    if [ ! -d "${target_dir}" ]; then
+        error_exit "Target directory does not exist: ${target_dir}"
+    fi
+    
+    # Convert target directory to absolute path
+    local abs_target_dir
+    if command_exists realpath; then
+        abs_target_dir=$(realpath "${target_dir}")
+    else
+        # Fallback for systems without realpath
+        abs_target_dir=$(cd "${target_dir}" && pwd)
+    fi
+    
+    verbose_log "Target directory (absolute): ${abs_target_dir}"
+    
+    # Create temporary file for processing
+    local temp_file=$(mktemp)
+    local binding_count=0
+    
+    log "Scanning directories in: ${abs_target_dir}"
+    
+    # Log TLD filtering status
+    if [ "${PREFER_TLD_DIRS}" == "yes" ]; then
+        log "TLD filtering is enabled - only domain-like directories will be included"
+    fi
+    
+    # Use ls -d to list directories, then process each one
+    if [ "${DRY_RUN}" == "yes" ]; then
+        log "DRY RUN: Would execute: ls -d ${abs_target_dir}/*/ 2>/dev/null"
+        log "DRY RUN: Would create mount bindings file: ${output_file}"
+        if [ "${PREFER_TLD_DIRS}" == "yes" ]; then
+            log "DRY RUN: Would apply TLD filtering to found directories"
+        fi
+        return 0
+    fi
+    
+    # List directories and process them
+    while IFS= read -r -d '' dir; do
+        # Get absolute path of the directory
+        local abs_dir
+        if command_exists realpath; then
+            abs_dir=$(realpath "${dir}")
+        else
+            abs_dir=$(cd "${dir}" && pwd)
+        fi
+        
+        # Get basename for the destination
+        local basename=$(basename "${abs_dir}")
+        
+        # Skip if directory name is empty or contains problematic characters
+        if [[ -z "${basename}" ]] || [[ "${basename}" =~ [[:space:]] ]] || [[ "${basename}" =~ \.\. ]]; then
+            log "Warning: Skipping directory with problematic name: ${basename}"
+            continue
+        fi
+        
+        # Apply TLD filtering if --prefer-tld-dirs is enabled
+        if [ "${PREFER_TLD_DIRS}" == "yes" ]; then
+            if ! is_domain_like "${basename}"; then
+                verbose_log "Skipping directory '${basename}' (does not match domain pattern)"
+                continue
+            fi
+        fi
+        
+        # Format as source::sites/destination
+        local mount_binding="${abs_dir}::sites/${basename}"
+        
+        # Add to temp file
+        echo "${mount_binding}" >> "${temp_file}"
+        binding_count=$((binding_count + 1))
+        
+        verbose_log "Added binding: ${mount_binding}"
+        
+    done < <(find "${abs_target_dir}" -maxdepth 1 -type d ! -path "${abs_target_dir}" -print0 2>/dev/null)
+    
+    # If no directories found, try a different approach
+    if [ ${binding_count} -eq 0 ]; then
+        log "No subdirectories found using find. Trying ls approach..."
+        
+        # Use ls -d with glob pattern
+        for dir in "${abs_target_dir}"/*/; do
+            # Check if glob pattern matched any directories
+            if [ -d "${dir}" ]; then
+                local abs_dir
+                if command_exists realpath; then
+                    abs_dir=$(realpath "${dir}")
+                else
+                    abs_dir=$(cd "${dir}" && pwd)
+                fi
+                
+                local basename=$(basename "${abs_dir}")
+                
+                # Skip if directory name contains problematic characters
+                if [[ -z "${basename}" ]] || [[ "${basename}" =~ [[:space:]] ]] || [[ "${basename}" =~ \.\. ]]; then
+                    log "Warning: Skipping directory with problematic name: ${basename}"
+                    continue
+                fi
+                
+                # Apply TLD filtering if --prefer-tld-dirs is enabled
+                if [ "${PREFER_TLD_DIRS}" == "yes" ]; then
+                    if ! is_domain_like "${basename}"; then
+                        verbose_log "Skipping directory '${basename}' (does not match domain pattern)"
+                        continue
+                    fi
+                fi
+                
+                local mount_binding="${abs_dir}::sites/${basename}"
+                echo "${mount_binding}" >> "${temp_file}"
+                binding_count=$((binding_count + 1))
+                
+                verbose_log "Added binding: ${mount_binding}"
+            fi
+        done
+    fi
+    
+    if [ ${binding_count} -eq 0 ]; then
+        log "Warning: No directories found in ${abs_target_dir}"
+        rm -f "${temp_file}"
+        return 1
+    fi
+    
+    # Sort the bindings for consistent output
+    sort "${temp_file}" > "${output_file}"
+    rm -f "${temp_file}"
+    
+    log "Successfully created mount bindings file: ${output_file}"
+    log "Generated ${binding_count} mount binding(s)"
+    
+    # Display the contents if verbose mode is enabled
+    if [ "${VERBOSE_MODE}" == "yes" ]; then
+        log "Mount bindings file contents:"
+        while IFS= read -r line; do
+            log "  ${line}"
+        done < "${output_file}"
+    else
+        log "Use --verbose to see the generated bindings, or check: ${output_file}"
+    fi
+    
+    return 0
 }
 
 # Function to check mount status and report
@@ -528,6 +1052,38 @@ parse_bind_mounts_file() {
     fi
 }
 
+# Function to validate permission arguments
+validate_permission_arguments() {
+    # Check for mutually exclusive permission flags
+    local perm_flags_count=0
+    
+    if [ "${SET_PERMS_FOR_USER}" == "yes" ]; then
+        perm_flags_count=$((perm_flags_count + 1))
+    fi
+    
+    if [ "${SET_PERMS}" == "yes" ]; then
+        perm_flags_count=$((perm_flags_count + 1))
+    fi
+    
+    if [ ${perm_flags_count} -gt 1 ]; then
+        error_exit "Permission flags --set-perms-for-user and --set-perms are mutually exclusive. Please use only one."
+    fi
+    
+    # Validate that --normalize-perms only works with --keep-original-owner
+    if [ "${NORMALIZE_PERMS}" == "yes" ] && [ "${KEEP_ORIGINAL_OWNER}" != "yes" ]; then
+        error_exit "--normalize-perms can only be used with --keep-original-owner."
+    fi
+    
+    # Validate permission values are provided if flags are set
+    if [ "${SET_PERMS_FOR_USER}" == "yes" ] && [ -z "${USER_PERMS}" ]; then
+        error_exit "Permission value is required with --set-perms-for-user."
+    fi
+    
+    if [ "${SET_PERMS}" == "yes" ] && [ -z "${ALL_PERMS}" ]; then
+        error_exit "Permission value is required with --set-perms."
+    fi
+}
+
 # Function to parse command-line arguments
 parse_arguments() {
     while [[ "$#" -gt 0 ]]; do
@@ -579,6 +1135,14 @@ parse_arguments() {
                 GENERATE_PASSWORD="yes"
                 shift
                 ;;
+            --set-password)
+                SET_PASSWORD="yes"
+                USER_PASSWORD="$2"
+                if [[ -z "$USER_PASSWORD" ]]; then
+                    error_exit "Password cannot be empty. Please provide a password with --set-password."
+                fi
+                shift 2
+                ;;
             --verbose)
                 VERBOSE_MODE="yes"
                 shift
@@ -587,9 +1151,63 @@ parse_arguments() {
                 CHECK_MOUNTS_ONLY="yes"
                 shift
                 ;;
+            --prep-mount-bindings)
+                PREP_MOUNT_BINDINGS="yes"
+                # Check if next argument is a directory (not starting with -)
+                if [[ $# -gt 1 && ! "$2" =~ ^- ]]; then
+                    PREP_MOUNT_BINDINGS_DIR="$2"
+                    shift 2
+                else
+                    PREP_MOUNT_BINDINGS_DIR="$(pwd)"
+                    shift
+                fi
+                ;;
+            --process-mount-bindings)
+                PROCESS_MOUNT_BINDINGS="yes"
+                # Check if next argument is a directory (not starting with -)
+                if [[ $# -gt 1 && ! "$2" =~ ^- ]]; then
+                    PROCESS_MOUNT_BINDINGS_DIR="$2"
+                    shift 2
+                else
+                    PROCESS_MOUNT_BINDINGS_DIR="$(pwd)"
+                    shift
+                fi
+                ;;
+            --prefer-tld-dirs)
+                PREFER_TLD_DIRS="yes"
+                shift
+                ;;
             --keep-original-owner)
                 KEEP_ORIGINAL_OWNER="yes"
                 shift
+                ;;
+            --normalize-perms)
+                NORMALIZE_PERMS="yes"
+                shift
+                ;;
+            --set-perms-for-user)
+                SET_PERMS_FOR_USER="yes"
+                USER_PERMS="$2"
+                if [[ -z "$USER_PERMS" ]]; then
+                    error_exit "Permission value is required with --set-perms-for-user. Please provide a value (e.g., 755)."
+                fi
+                # Validate permission format (3 or 4 digit octal)
+                if [[ ! "$USER_PERMS" =~ ^[0-7]{3,4}$ ]]; then
+                    error_exit "Invalid permission format: '${USER_PERMS}'. Please use octal format (e.g., 755, 0755)."
+                fi
+                shift 2
+                ;;
+            --set-perms)
+                SET_PERMS="yes"
+                ALL_PERMS="$2"
+                if [[ -z "$ALL_PERMS" ]]; then
+                    error_exit "Permission value is required with --set-perms. Please provide a value (e.g., 775)."
+                fi
+                # Validate permission format (3 or 4 digit octal)
+                if [[ ! "$ALL_PERMS" =~ ^[0-7]{3,4}$ ]]; then
+                    error_exit "Invalid permission format: '${ALL_PERMS}'. Please use octal format (e.g., 775, 0775)."
+                fi
+                shift 2
                 ;;
             --dry-run)
                 DRY_RUN="yes"
@@ -619,29 +1237,56 @@ create_user_and_dirs() {
         log "User '${FTP_USER}' already exists. Skipping user creation."
     fi
 
-    # Handle password generation if requested
-    if [ "${GENERATE_PASSWORD}" == "yes" ]; then
+    # Handle password setting if requested
+    if [ "${GENERATE_PASSWORD}" == "yes" ] || [ "${SET_PASSWORD}" == "yes" ]; then
+        # Check for conflicting password options
+        if [ "${GENERATE_PASSWORD}" == "yes" ] && [ "${SET_PASSWORD}" == "yes" ]; then
+            error_exit "Cannot use both --generate-password and --set-password. Please choose one."
+        fi
+        
         if [ "${USER_CREATED}" == "yes" ] || [ "${ADD_MOUNTS_ONLY}" != "yes" ]; then
-            log "Generating temporary password for user '${FTP_USER}'..."
-            TEMP_PASSWORD=$(generate_temp_password)
+            local password_to_set=""
+            local password_source=""
             
-            if [ -n "${TEMP_PASSWORD}" ]; then
-                execute_or_log "Setting temporary password" set_user_password "${FTP_USER}" "${TEMP_PASSWORD}" || error_exit "Failed to set password for user ${FTP_USER}."
+            if [ "${GENERATE_PASSWORD}" == "yes" ]; then
+                log "Generating temporary password for user '${FTP_USER}'..."
+                password_to_set=$(generate_temp_password)
+                password_source="generated"
+                
+                if [ -z "${password_to_set}" ]; then
+                    error_exit "Failed to generate temporary password."
+                fi
+            elif [ "${SET_PASSWORD}" == "yes" ]; then
+                log "Setting specified password for user '${FTP_USER}'..."
+                password_to_set="${USER_PASSWORD}"
+                password_source="specified"
+                
+                # Basic password validation
+                if [ ${#password_to_set} -lt 4 ]; then
+                    error_exit "Password too short. Please use at least 4 characters."
+                fi
+            fi
+            
+            if [ -n "${password_to_set}" ]; then
+                execute_or_log "Setting ${password_source} password" set_user_password "${FTP_USER}" "${password_to_set}" || error_exit "Failed to set password for user ${FTP_USER}."
                 
                 if [ "${DRY_RUN}" == "no" ]; then
-                    log "SUCCESS: Temporary password set for user '${FTP_USER}'"
-                    log "============================================"
-                    log "TEMPORARY PASSWORD: ${TEMP_PASSWORD}"
-                    log "============================================"
-                    log "IMPORTANT: Please save this password securely and consider changing it after first login!"
+                    log "SUCCESS: Password set for user '${FTP_USER}'"
+                    if [ "${password_source}" == "generated" ]; then
+                        log "============================================"
+                        log "TEMPORARY PASSWORD: ${password_to_set}"
+                        log "============================================"
+                        log "IMPORTANT: Please save this password securely and consider changing it after first login!"
+                    else
+                        log "User password has been set to the specified value."
+                        log "IMPORTANT: Please ensure you remember this password for FTP access!"
+                    fi
                 else
-                    log "DRY RUN: Would generate and set temporary password for user '${FTP_USER}'"
+                    log "DRY RUN: Would set ${password_source} password for user '${FTP_USER}'"
                 fi
-            else
-                error_exit "Failed to generate temporary password."
             fi
         else
-            log "Password generation requested but user already exists and add-mounts-only mode is active. Skipping password generation."
+            log "Password setting requested but user already exists and add-mounts-only mode is active. Skipping password setting."
         fi
     fi
 
@@ -655,8 +1300,19 @@ create_user_and_dirs() {
     UPLOAD_DIR="${HOME_DIR}/uploads"
     execute_or_log "Creating writable uploads directory ${UPLOAD_DIR}" sudo mkdir -p "${UPLOAD_DIR}" || error_exit "Failed to create uploads directory ${UPLOAD_DIR}."
     execute_or_log "Setting ownership of ${UPLOAD_DIR}" sudo chown "${FTP_USER}:${FTP_USER}" "${UPLOAD_DIR}" || error_exit "Failed to set ownership of ${UPLOAD_DIR}."
-    execute_or_log "Setting permissions of ${UPLOAD_DIR}" sudo chmod 775 "${UPLOAD_DIR}" || error_exit "Failed to set permissions of ${UPLOAD_DIR}."
-    log "Created writable uploads directory: ${UPLOAD_DIR}."
+    
+    # Set permissions based on flags
+    local upload_perms="775"  # default
+    if [ "${SET_PERMS}" == "yes" ]; then
+        upload_perms="${ALL_PERMS}"
+        verbose_log "Using --set-perms value ${ALL_PERMS} for uploads directory"
+    elif [ "${SET_PERMS_FOR_USER}" == "yes" ]; then
+        upload_perms="${USER_PERMS}"
+        verbose_log "Using --set-perms-for-user value ${USER_PERMS} for uploads directory"
+    fi
+    
+    execute_or_log "Setting permissions of ${UPLOAD_DIR}" sudo chmod "${upload_perms}" "${UPLOAD_DIR}" || error_exit "Failed to set permissions of ${UPLOAD_DIR}."
+    log "Created writable uploads directory: ${UPLOAD_DIR} (permissions: ${upload_perms})."
 
     # Create destination directories for bind mounts and set ownership
     for mount_pair in "${BIND_MOUNTS[@]}"; do
@@ -674,8 +1330,19 @@ create_user_and_dirs() {
 
         execute_or_log "Creating bind-mount destination directory ${DEST_DIR_IN_CHROOT}" sudo mkdir -p "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to create destination directory ${DEST_DIR_IN_CHROOT}."
         execute_or_log "Setting ownership of ${DEST_DIR_IN_CHROOT}" sudo chown "${FTP_USER}:${FTP_USER}" "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to set ownership of ${DEST_DIR_IN_CHROOT}."
-        execute_or_log "Setting permissions of ${DEST_DIR_IN_CHROOT}" sudo chmod 755 "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to set permissions of ${DEST_DIR_IN_CHROOT}."
-        log "Created bind-mount destination directory: ${DEST_DIR_IN_CHROOT}."
+        
+        # Set permissions based on flags
+        local dest_perms="755"  # default
+        if [ "${SET_PERMS}" == "yes" ]; then
+            dest_perms="${ALL_PERMS}"
+            verbose_log "Using --set-perms value ${ALL_PERMS} for destination directory"
+        elif [ "${SET_PERMS_FOR_USER}" == "yes" ]; then
+            dest_perms="${USER_PERMS}"
+            verbose_log "Using --set-perms-for-user value ${USER_PERMS} for destination directory"
+        fi
+        
+        execute_or_log "Setting permissions of ${DEST_DIR_IN_CHROOT}" sudo chmod "${dest_perms}" "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to set permissions of ${DEST_DIR_IN_CHROOT}."
+        log "Created bind-mount destination directory: ${DEST_DIR_IN_CHROOT} (permissions: ${dest_perms})."
     done
 }
 
@@ -724,8 +1391,19 @@ add_mounts_to_existing_user() {
 
         execute_or_log "Creating bind-mount destination directory ${DEST_DIR_IN_CHROOT}" sudo mkdir -p "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to create destination directory ${DEST_DIR_IN_CHROOT}."
         execute_or_log "Setting ownership of ${DEST_DIR_IN_CHROOT}" sudo chown "${FTP_USER}:${FTP_USER}" "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to set ownership of ${DEST_DIR_IN_CHROOT}."
-        execute_or_log "Setting permissions of ${DEST_DIR_IN_CHROOT}" sudo chmod 755 "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to set permissions of ${DEST_DIR_IN_CHROOT}."
-        log "Created bind-mount destination directory: ${DEST_DIR_IN_CHROOT}."
+        
+        # Set permissions based on flags
+        local dest_perms="755"  # default
+        if [ "${SET_PERMS}" == "yes" ]; then
+            dest_perms="${ALL_PERMS}"
+            verbose_log "Using --set-perms value ${ALL_PERMS} for destination directory"
+        elif [ "${SET_PERMS_FOR_USER}" == "yes" ]; then
+            dest_perms="${USER_PERMS}"
+            verbose_log "Using --set-perms-for-user value ${USER_PERMS} for destination directory"
+        fi
+        
+        execute_or_log "Setting permissions of ${DEST_DIR_IN_CHROOT}" sudo chmod "${dest_perms}" "${DEST_DIR_IN_CHROOT}" || error_exit "Failed to set permissions of ${DEST_DIR_IN_CHROOT}."
+        log "Created bind-mount destination directory: ${DEST_DIR_IN_CHROOT} (permissions: ${dest_perms})."
         
     done
 
@@ -957,6 +1635,9 @@ main() {
     # Parse command-line arguments first (to handle --help without root check)
     parse_arguments "$@"
     
+    # Validate permission arguments
+    validate_permission_arguments
+    
     # Check for root privileges (skip for help)
     if [[ $EUID -ne 0 ]]; then
         error_exit "This script must be run as root. Please use sudo."
@@ -992,12 +1673,68 @@ main() {
         return 0
     fi
 
+    # Handle prep-mount-bindings mode
+    if [ "${PREP_MOUNT_BINDINGS}" == "yes" ]; then
+        log "Prep mount bindings mode enabled"
+        log "Target directory: '${PREP_MOUNT_BINDINGS_DIR}'"
+        log "TLD filtering enabled: ${PREFER_TLD_DIRS}"
+        log "Verbose mode: ${VERBOSE_MODE}"
+        log "Dry run enabled: ${DRY_RUN}"
+        echo ""
+        
+        # Generate output filename with timestamp
+        local timestamp=$(date +%Y%m%d_%H%M%S)
+        local output_file="mount_bindings_${timestamp}.txt"
+        
+        if prep_mount_bindings "${PREP_MOUNT_BINDINGS_DIR}" "${output_file}"; then
+            log "Mount bindings preparation completed successfully!"
+            if [ "${DRY_RUN}" == "no" ]; then
+                log "You can now use this file with: --bind-mounts ${output_file}"
+            fi
+        else
+            error_exit "Failed to prepare mount bindings"
+        fi
+        return 0
+    fi
+
+    # Handle process-mount-bindings mode
+    if [ "${PROCESS_MOUNT_BINDINGS}" == "yes" ]; then
+        log "Process mount bindings mode enabled"
+        log "Target directory: '${PROCESS_MOUNT_BINDINGS_DIR}'"
+        log "FTP user: '${FTP_USER}'"
+        log "Home directory: '${HOME_DIR}'"
+        log "TLD filtering enabled: ${PREFER_TLD_DIRS}"
+        log "Keep original owner: ${KEEP_ORIGINAL_OWNER}"
+        log "Verbose mode: ${VERBOSE_MODE}"
+        log "Dry run enabled: ${DRY_RUN}"
+        echo ""
+        
+        # Process the mount bindings directly
+        if process_mount_bindings "${PROCESS_MOUNT_BINDINGS_DIR}" "${FTP_USER}" "${HOME_DIR}"; then
+            log "Mount bindings processed successfully! Proceeding with full FTP setup..."
+            echo ""
+            # Continue with the full setup process using the populated BIND_MOUNTS array
+        else
+            error_exit "Failed to process mount bindings from directory"
+        fi
+        # Don't return here - continue with full setup
+    fi
+
     # Handle add-mounts-only mode
     if [ "${ADD_MOUNTS_ONLY}" == "yes" ]; then
         log "Add-mounts-only mode enabled for user: '${FTP_USER}'"
         log "Home directory: '${HOME_DIR}'"
         log "New bind mounts to add: ${BIND_MOUNTS[@]}"
         log "Keep original owner: ${KEEP_ORIGINAL_OWNER}"
+        log "Normalize permissions: ${NORMALIZE_PERMS}"
+        log "Set permissions for user: ${SET_PERMS_FOR_USER}"
+        if [ "${SET_PERMS_FOR_USER}" == "yes" ]; then
+            log "User permissions value: ${USER_PERMS}"
+        fi
+        log "Set permissions for all: ${SET_PERMS}"
+        if [ "${SET_PERMS}" == "yes" ]; then
+            log "All permissions value: ${ALL_PERMS}"
+        fi
         log "Dry run enabled: ${DRY_RUN}"
         echo ""
 
@@ -1013,6 +1750,15 @@ main() {
     log "Passive ports: ${PASV_MIN_PORT}-${PASV_MAX_PORT}"
     log "Firewall type: ${FIREWALL_TYPE}"
     log "Keep original owner: ${KEEP_ORIGINAL_OWNER}"
+    log "Normalize permissions: ${NORMALIZE_PERMS}"
+    log "Set permissions for user: ${SET_PERMS_FOR_USER}"
+    if [ "${SET_PERMS_FOR_USER}" == "yes" ]; then
+        log "User permissions value: ${USER_PERMS}"
+    fi
+    log "Set permissions for all: ${SET_PERMS}"
+    if [ "${SET_PERMS}" == "yes" ]; then
+        log "All permissions value: ${ALL_PERMS}"
+    fi
     log "Dry run enabled: ${DRY_RUN}"
     log "Verbose mode enabled: ${VERBOSE_MODE}"
     echo ""
@@ -1076,6 +1822,8 @@ main() {
     
     if [ "${GENERATE_PASSWORD}" == "yes" ]; then
         log "User password has been automatically generated and set (see above for password details)."
+    elif [ "${SET_PASSWORD}" == "yes" ]; then
+        log "User password has been set to your specified value."
     else
         log "Remember to set a password for the user if you haven't already: 'sudo passwd ${FTP_USER}'"
     fi
