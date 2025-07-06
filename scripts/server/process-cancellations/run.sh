@@ -1,6 +1,8 @@
 #!/bin/bash
 
-rm -rf ./venv
+CANCELLATION_DIR="/var/opt/scripts/process-cancellations"
+
+rm -rf $CANCELLATION_DIR/venv
 
 rm -rf ./__pycache__
 
@@ -22,8 +24,8 @@ if ! python3.12 -m venv --help &> /dev/null; then
 fi
 
 # Create a virtual environment
-if [ ! -d "venv" ]; then
-	venv_utils create -n venv
+if [ ! -d "$CANCELLATION_DIR/venv" ]; then
+	venv_utils create -n $CANCELLATION_DIR/venv
 	if [ $? -ne 0 ]; then
 		echo "Failed to create virtual environment. Please check your Python installation."
 		exit 1
@@ -32,26 +34,26 @@ else
 	echo "Virtual environment already exists."
 fi
 
-venv_utils activate venv
+venv_utils activate $CANCELLATION_DIR/venv
 if [ $? -ne 0 ]; then
 	echo "Failed to activate virtual environment. Please check your Python installation."
 	exit 1
 fi
 
 # Activate the virtual environment
-source venv/bin/activate
+source $CANCELLATION_DIR/venv/bin/activate
 
 # Install required packages
-venv_utils install -r requirements.txt
+venv_utils install -r $CANCELLATION_DIR/requirements.txt
 if [ $? -ne 0 ]; then
 	echo "Failed to install required packages. Please check your requirements.txt file."
 	exit 1
 fi
 
 # Run the main script with provided arguments for cancellation processing
-python3.12 main.py \
-	--creds-file ./site-url-python-script-6a43db57673f.json \
-	--spreadsheet-id "1swBOVDOm97UTnQzJI_DqzbNbjwBI0FkVFGVkRFnu-2Y" \
+python3.12 $CANCELLATION_DIR/main.py \
+	--creds-file $CANCELLATION_DIR/site-url-python-script-6a43db57673f.json \
+	--spreadsheet-id "1H-CeEZaoCpNg45HaBSqhUZPd-lJ1PgYyQXiBmVFEVz8" \
 	--sheet-name "Sites To Be Canceled" \
 	--log-sheet "Log" \
 	--url-column "URL" \
