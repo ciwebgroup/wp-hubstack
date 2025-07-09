@@ -1,0 +1,2 @@
+python-dotenv==1.0.0
+uptime-kuma-api==1.2.1 

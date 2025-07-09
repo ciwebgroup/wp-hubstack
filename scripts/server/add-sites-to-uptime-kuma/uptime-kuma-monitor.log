@@ -1,0 +1,5 @@
+2025-07-09 10:07:19,232 - INFO - Loaded Uptime Kuma URL: https://uptime-kuma.dev.ciwgserver.com/
+2025-07-09 10:07:19,233 - INFO - [DRY RUN] Would connect to Uptime Kuma API
+2025-07-09 10:07:19,233 - INFO - Starting container processing...
+2025-07-09 10:07:19,518 - INFO - Filtered 0 containers to 0 matching pattern '^wp_'
+2025-07-09 10:07:19,518 - WARNING - No containers found to process

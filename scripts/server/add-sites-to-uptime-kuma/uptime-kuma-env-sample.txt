@@ -1,0 +1,13 @@
+# Uptime Kuma Configuration Sample
+# Copy this file to .env and update with your actual values
+
+# Base URL of your Uptime Kuma instance (include protocol)
+UPTIME_KUMA_URL=https://your-uptime-kuma-instance.com
+
+# Uptime Kuma login credentials
+# These are the same credentials you use to log into the web interface
+UPTIME_KUMA_USERNAME=your-username
+UPTIME_KUMA_PASSWORD=your-password
+
+# Note: API tokens are not used for this script as we use the WebSocket API
+# which requires username/password authentication 
