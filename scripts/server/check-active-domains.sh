@@ -32,6 +32,7 @@ OPTIONS
   -o, --output FILE    Write CSV results (domain,true|false) to FILE
       --overwrite      Overwrite FILE without prompting
       --append         Append to FILE without prompting
+      --dry-run        Show what checks would be performed with high verbosity.
   -d, --debug          Verbose: ssh -vvv + remote bash -x
   -h, --help           Show this help and exit.
 
@@ -44,13 +45,14 @@ EOF
 ##############################################################################
 # Option parsing
 ##############################################################################
-OUTPUT_FILE=""; WRITE_MODE=""; DEBUG=""
+OUTPUT_FILE=""; WRITE_MODE=""; DEBUG=""; DRY_RUN=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -o|--output) [[ $# -lt 2 ]] && { echo "Missing arg for $1"; exit 1; }
                  OUTPUT_FILE=$2; shift 2 ;;
     --overwrite) WRITE_MODE=overwrite; shift ;;
     --append)    WRITE_MODE=append;   shift ;;
+    --dry-run)   DRY_RUN=1;           shift ;;
     -d|--debug)  DEBUG=1;            shift ;;
     -h|--help)   usage; exit 0 ;;
     --)          shift; break ;;
@@ -95,6 +97,7 @@ set -euo pipefail
 [[ -n ${REMOTE_DEBUG:-} ]] && set -x
 
 DOMAIN_PATH=$1
+DRY_RUN=${DRY_RUN:-}
 # Cloudflare ENV vars passed from client
 NS1=${NS1:-}
 NS2=${NS2:-}
@@ -119,12 +122,16 @@ for compose_file in "${DOMAIN_PATH}"/*/docker-compose.yml; do
   [[ -z $wp_services ]] && continue
 
   domain=$(basename "$(dirname "$compose_file")")
+  if [[ -n $DRY_RUN ]]; then
+      info "[DRY RUN] Checking domain: $domain"
+  fi
 
   # gather A records (may be empty)
   unset A_RECORDS
   declare -a A_RECORDS
 
   # Check NS records to decide lookup method
+  if [[ -n $DRY_RUN ]]; then info "[DRY RUN]   Checking NS records for '$domain' with 'dig'"; fi
   mapfile -t NS_RECORDS < <(dig +short NS "$domain" || true)
   on_cloudflare=false
   if [[ -n "$NS1" && -n "$NS2" ]]; then
@@ -141,12 +148,17 @@ for compose_file in "${DOMAIN_PATH}"/*/docker-compose.yml; do
   fi
 
   if $on_cloudflare; then
-      info "☁️  $domain is on Cloudflare, checking via API..."
+      if [[ -n $DRY_RUN ]]; then
+          info "[DRY RUN]   Domain '$domain' appears to be on Cloudflare. Using API."
+      else
+          info "☁️  $domain is on Cloudflare, checking via API..."
+      fi
       if ! command -v jq &>/dev/null; then
           warn "  ✗ 'jq' is not installed on remote. Cannot check Cloudflare domain."
       elif [[ -z "$CLOUDFLARE_EMAIL" || -z "$CLOUDFLARE_API_KEY" ]]; then
           warn "  ✗ CLOUDFLARE_EMAIL/API_KEY not set. Cannot check Cloudflare domain."
       else
+          if [[ -n $DRY_RUN ]]; then info "[DRY RUN]   Calling Cloudflare API for Zone ID..."; fi
           ZONE_RESPONSE=$(curl -s --request GET \
               --url "https://api.cloudflare.com/client/v4/zones?name=$domain" \
               --header "Content-Type: application/json" \
@@ -160,6 +172,7 @@ for compose_file in "${DOMAIN_PATH}"/*/docker-compose.yml; do
               if [[ -z "$ZONE_ID" || "$ZONE_ID" == "null" ]]; then
                   warn "  ✗ Could not find Cloudflare Zone ID for $domain"
               else
+                  if [[ -n $DRY_RUN ]]; then info "[DRY RUN]   Calling Cloudflare API for A records..."; fi
                   RECORD_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?type=A&name=$domain" \
                       -H "Content-Type: application/json" \
                       -H "X-Auth-Email: $CLOUDFLARE_EMAIL" \
@@ -174,10 +187,12 @@ for compose_file in "${DOMAIN_PATH}"/*/docker-compose.yml; do
           fi
       fi
   else
+      if [[ -n $DRY_RUN ]]; then info "[DRY RUN]   Domain '$domain' not on Cloudflare. Using 'dig' for A records."; fi
       # Fallback to dig for non-Cloudflare domains
       mapfile -t A_RECORDS < <(dig +short A "$domain" || true)
   fi
 
+  if [[ -n $DRY_RUN ]]; then info "[DRY RUN]   Comparing records (${A_RECORDS[*]:-none}) to server IP ($SERVER_IP)"; fi
   match=false
   for ip in "${A_RECORDS[@]}"; do
     if [[ $ip == "$SERVER_IP" ]]; then
@@ -205,6 +220,7 @@ SSH_CMD=(ssh -T "$TARGET")
 [[ -n $DEBUG ]] && SSH_CMD+=( -vvv )
 REMOTE_PREFIX="bash -s -- $DOMAIN_PATH"
 [[ -n $DEBUG ]] && REMOTE_PREFIX="REMOTE_DEBUG=1 $REMOTE_PREFIX -x"
+[[ -n $DRY_RUN ]] && REMOTE_PREFIX="DRY_RUN=1 $REMOTE_PREFIX"
 [[ -n "${NS1:-}" ]] && REMOTE_PREFIX="NS1=$NS1 $REMOTE_PREFIX"
 [[ -n "${NS2:-}" ]] && REMOTE_PREFIX="NS2=$NS2 $REMOTE_PREFIX"
 [[ -n "${CLOUDFLARE_EMAIL:-}" ]] && REMOTE_PREFIX="CLOUDFLARE_EMAIL=$CLOUDFLARE_EMAIL $REMOTE_PREFIX"

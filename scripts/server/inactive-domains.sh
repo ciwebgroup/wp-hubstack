@@ -41,6 +41,7 @@ OPTIONS
       --overwrite      Overwrite FILE without prompting
       --append         Append to FILE without prompting
   -r, --remove         Backup **and** delete sites that are *not* on this server
+      --dry-run        Show what would be backed up and removed without making changes.
   -d, --debug          Verbose: ssh -vvv + remote bash -x
   -h, --help           Show this help and exit.
 
@@ -53,7 +54,7 @@ EOF
 ##############################################################################
 # Option parsing
 ##############################################################################
-OUTPUT_FILE=""; WRITE_MODE=""; DEBUG=""; REMOVE=""
+OUTPUT_FILE=""; WRITE_MODE=""; DEBUG=""; REMOVE=""; DRY_RUN=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -o|--output) [[ $# -lt 2 ]] && { echo "Missing arg for $1"; exit 1; }
@@ -61,6 +62,7 @@ while [[ $# -gt 0 ]]; do
     --overwrite) WRITE_MODE=overwrite; shift ;;
     --append)    WRITE_MODE=append;   shift ;;
     -r|--remove) REMOVE=1;            shift ;;
+    --dry-run)   DRY_RUN=1;           shift ;;
     -d|--debug)  DEBUG=1;             shift ;;
     -h|--help)   usage; exit 0 ;;
     --)          shift; break ;;
@@ -106,6 +108,7 @@ set -euo pipefail
 
 DOMAIN_PATH=$1
 REMOVE=${REMOVE:-}
+DRY_RUN=${DRY_RUN:-}
 # Cloudflare ENV vars passed from client
 NS1=${NS1:-}
 NS2=${NS2:-}
@@ -124,6 +127,30 @@ backup_and_remove(){
   local dir=$2
   local base=${domain%.*}
   local container="wp_${base}"
+
+  if [[ -n $DRY_RUN ]]; then
+    info "[DRY RUN] Would backup and remove '$domain'"
+    info "[DRY RUN]   - Target directory: $dir"
+    info "[DRY RUN]   - Container: $container"
+    info "[DRY RUN]   - Would check for container '$container'..."
+    info "[DRY RUN]   - Would run: docker exec $container rm -f wp-content/mysql.sql"
+    info "[DRY RUN]   - Would run: docker exec $container wp db export wp-content/mysql.sql --allow-root"
+    info "[DRY RUN]   - Would run: docker stop $container"
+    info "[DRY RUN]   - Would run: docker rm $container"
+    local stamp; stamp=$(date +%F_%H%M%S)
+    info "[DRY RUN]   - Would archive '$dir' to '/var/opt/backups/${domain}_${stamp}.tgz'"
+    local mysql_pass=""
+    [[ -f "$dir/.env" ]] && mysql_pass=$(grep -m1 '^MYSQL_PASS=' "$dir/.env" | cut -d= -f2-)
+    mysql_pass=${mysql_pass:-${MYSQL_PASS-}}
+    if [[ -n $mysql_pass ]]; then
+        info "[DRY RUN]   - Would run: docker exec mysql mysql -p'...' -e 'DROP DATABASE IF EXISTS wp_${base};'"
+        info "[DRY RUN]   - Would run: docker exec mysql mysql -p'...' -e 'DROP USER IF EXISTS \'${base}\'@\'%\';'"
+    else
+        info "[DRY RUN]   - Would skip DB/user drop (no password found)."
+    fi
+    info "[DRY RUN]   - Would run: rm -rf $dir"
+    return
+  fi
 
   mkdir -p /var/opt/backups
 
@@ -233,7 +260,7 @@ for compose_file in "${DOMAIN_PATH}"/*/docker-compose.yml; do
   else
     warn "✗ $domain → NOT on this server (A=${A_RECORDS[*]:-none})"
     echo "$domain,false"
-    if [[ -n $REMOVE ]]; then
+    if [[ -n $REMOVE || -n $DRY_RUN ]]; then
       backup_and_remove "$domain" "$(dirname "$compose_file")" || true
     fi
   fi
@@ -247,6 +274,7 @@ SSH_CMD=(ssh -T "$TARGET")
 REMOTE_PREFIX="bash -s -- $DOMAIN_PATH"
 [[ -n $DEBUG ]] && REMOTE_PREFIX="REMOTE_DEBUG=1 $REMOTE_PREFIX -x"
 [[ -n $REMOVE ]] && REMOTE_PREFIX="REMOVE=1 $REMOTE_PREFIX"
+[[ -n $DRY_RUN ]] && REMOTE_PREFIX="DRY_RUN=1 $REMOTE_PREFIX"
 [[ -n ${MYSQL_PASS:-} ]] && REMOTE_PREFIX="MYSQL_PASS=$MYSQL_PASS $REMOTE_PREFIX"
 [[ -n "${NS1:-}" ]] && REMOTE_PREFIX="NS1=$NS1 $REMOTE_PREFIX"
 [[ -n "${NS2:-}" ]] && REMOTE_PREFIX="NS2=$NS2 $REMOTE_PREFIX"
