@@ -12,7 +12,7 @@
 #   • Flags:  -o/--output FILE, --overwrite, --append, -d/--debug, -h/--help
 #   • Keeps set -euo pipefail; neutralises known non‑fatal exits.
 # ---------------------------------------------------------------------------
-set -auo pipefail
+set -uo pipefail
 
 ##############################################################################
 # Help / usage
@@ -65,13 +65,6 @@ done
 TARGET=$1
 [[ $TARGET != *@* ]] && TARGET="root@$TARGET"
 
-##############################################################################
-# .env load (auto‑export)
-##############################################################################
-SCRIPT_DIR=$(dirname "$0")
-if [[ -f "$SCRIPT_DIR/.env" ]]; then
-  source "$SCRIPT_DIR/.env"
-fi
 DOMAIN_PATH=${DOMAIN_PATH:-/var/opt}
 
 ##############################################################################
@@ -98,11 +91,7 @@ set -euo pipefail
 
 DOMAIN_PATH=$1
 DRY_RUN=${DRY_RUN:-}
-# Cloudflare ENV vars passed from client
-NS1=${NS1:-}
-NS2=${NS2:-}
-CLOUDFLARE_EMAIL=${CLOUDFLARE_EMAIL:-}
-CLOUDFLARE_API_KEY=${CLOUDFLARE_API_KEY:-}
+CLOUDFLARE_CHECKER_SCRIPT="check-cloudflare-domain.sh"
 
 # Determine the *remote* server's public IPv4.
 SERVER_IP=$(dig +short myip.opendns.com @resolver1.opendns.com | head -n1 | tr -d '\r')
@@ -126,86 +115,53 @@ for compose_file in "${DOMAIN_PATH}"/*/docker-compose.yml; do
       info "[DRY RUN] Checking domain: $domain"
   fi
 
-  # gather A records (may be empty)
-  unset A_RECORDS
-  declare -a A_RECORDS
-
-  # Check NS records to decide lookup method
-  if [[ -n $DRY_RUN ]]; then info "[DRY RUN]   Checking NS records for '$domain' with 'dig'"; fi
-  mapfile -t NS_RECORDS < <(dig +short NS "$domain" || true)
-  on_cloudflare=false
-  if [[ -n "$NS1" && -n "$NS2" ]]; then
-      ns1_found=false
-      ns2_found=false
-      for ns_record in "${NS_RECORDS[@]}"; do
-          # dig output has a trailing dot
-          [[ "${ns_record}" == "${NS1}." ]] && ns1_found=true
-          [[ "${ns_record}" == "${NS2}." ]] && ns2_found=true
-      done
-      if $ns1_found && $ns2_found; then
-          on_cloudflare=true
-      fi
-  fi
-
-  if $on_cloudflare; then
-      if [[ -n $DRY_RUN ]]; then
-          info "[DRY RUN]   Domain '$domain' appears to be on Cloudflare. Using API."
-      else
-          info "☁️  $domain is on Cloudflare, checking via API..."
-      fi
-      if ! command -v jq &>/dev/null; then
-          warn "  ✗ 'jq' is not installed on remote. Cannot check Cloudflare domain."
-      elif [[ -z "$CLOUDFLARE_EMAIL" || -z "$CLOUDFLARE_API_KEY" ]]; then
-          warn "  ✗ CLOUDFLARE_EMAIL/API_KEY not set. Cannot check Cloudflare domain."
-      else
-          if [[ -n $DRY_RUN ]]; then info "[DRY RUN]   Calling Cloudflare API for Zone ID..."; fi
-          ZONE_RESPONSE=$(curl -s --request GET \
-              --url "https://api.cloudflare.com/client/v4/zones?name=$domain" \
-              --header "Content-Type: application/json" \
-              --header "X-Auth-Email: ${CLOUDFLARE_EMAIL}" \
-              --header "X-Auth-Key: ${CLOUDFLARE_API_KEY}")
-
-          if [[ $(echo "$ZONE_RESPONSE" | jq -r '.success') != "true" ]]; then
-              warn "  ✗ Cloudflare API error getting Zone ID for $domain"
-          else
-              ZONE_ID=$(echo "$ZONE_RESPONSE" | jq -r '.result[0].id')
-              if [[ -z "$ZONE_ID" || "$ZONE_ID" == "null" ]]; then
-                  warn "  ✗ Could not find Cloudflare Zone ID for $domain"
-              else
-                  if [[ -n $DRY_RUN ]]; then info "[DRY RUN]   Calling Cloudflare API for A records..."; fi
-                  RECORD_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?type=A&name=$domain" \
-                      -H "Content-Type: application/json" \
-                      -H "X-Auth-Email: $CLOUDFLARE_EMAIL" \
-                      -H "X-Auth-Key: $CLOUDFLARE_API_KEY")
-
-                  if [[ $(echo "$RECORD_RESPONSE" | jq -r '.success') != "true" ]]; then
-                      warn "  ✗ Cloudflare API error getting A records for $domain"
-                  else
-                      mapfile -t A_RECORDS < <(echo "$RECORD_RESPONSE" | jq -r '.result[].content')
-                  fi
-              fi
-          fi
-      fi
-  else
-      if [[ -n $DRY_RUN ]]; then info "[DRY RUN]   Domain '$domain' not on Cloudflare. Using 'dig' for A records."; fi
-      # Fallback to dig for non-Cloudflare domains
-      mapfile -t A_RECORDS < <(dig +short A "$domain" || true)
-  fi
-
-  if [[ -n $DRY_RUN ]]; then info "[DRY RUN]   Comparing records (${A_RECORDS[*]:-none}) to server IP ($SERVER_IP)"; fi
   match=false
-  for ip in "${A_RECORDS[@]}"; do
-    if [[ $ip == "$SERVER_IP" ]]; then
-      match=true
-      break
-    fi
-  done
+  a_records_str="none"
+  processed_by_cf=false
+
+  # Check via Cloudflare script first, if it's executable and in the PATH
+  if command -v "$CLOUDFLARE_CHECKER_SCRIPT" &>/dev/null; then
+      if [[ -n $DRY_RUN ]]; then info "[DRY RUN]   Cloudflare checker script found, executing..."; fi
+      
+      cf_exit_status=0
+      # Suppress checker's output and handle non-zero exit codes gracefully
+      "$CLOUDFLARE_CHECKER_SCRIPT" "$domain" "$SERVER_IP" >/dev/null 2>&1 || cf_exit_status=$?
+
+      case $cf_exit_status in
+        0) # On CF, A record matches
+          match=true
+          processed_by_cf=true
+          ;;
+        1) # On CF, A record does NOT match
+          match=false
+          a_records_str="Cloudflare (mismatch)"
+          processed_by_cf=true
+          ;;
+        3) # Prerequisite/API error from checker
+          warn "  ✗ Cloudflare check for '$domain' failed (see errors from helper script). Falling back to dig."
+          ;;
+        # Case 2 (Not on CF) will fall through to the dig check below
+      esac
+  fi
+
+  # If not processed by the Cloudflare script, fall back to dig
+  if ! $processed_by_cf; then
+      if [[ -n $DRY_RUN ]]; then info "[DRY RUN]   Using 'dig' for A records."; fi
+      mapfile -t A_RECORDS < <(dig +short A "$domain" || true)
+      a_records_str="${A_RECORDS[*]:-none}"
+      for ip in "${A_RECORDS[@]}"; do
+        if [[ $ip == "$SERVER_IP" ]]; then
+          match=true
+          break
+        fi
+      done
+  fi
 
   if $match; then
     info "✓ $domain → on this server"
     echo "$domain,true"
   else
-    warn "✗ $domain → NOT on this server (A=${A_RECORDS[*]:-none})"
+    warn "✗ $domain → NOT on this server (A=${a_records_str})"
     echo "$domain,false"
   fi
 
@@ -218,13 +174,12 @@ REMOTE
 ##############################################################################
 SSH_CMD=(ssh -T "$TARGET")
 [[ -n $DEBUG ]] && SSH_CMD+=( -vvv )
-REMOTE_PREFIX="bash -s -- $DOMAIN_PATH"
-[[ -n $DEBUG ]] && REMOTE_PREFIX="REMOTE_DEBUG=1 $REMOTE_PREFIX -x"
-[[ -n $DRY_RUN ]] && REMOTE_PREFIX="DRY_RUN=1 $REMOTE_PREFIX"
-[[ -n "${NS1:-}" ]] && REMOTE_PREFIX="NS1=$NS1 $REMOTE_PREFIX"
-[[ -n "${NS2:-}" ]] && REMOTE_PREFIX="NS2=$NS2 $REMOTE_PREFIX"
-[[ -n "${CLOUDFLARE_EMAIL:-}" ]] && REMOTE_PREFIX="CLOUDFLARE_EMAIL=$CLOUDFLARE_EMAIL $REMOTE_PREFIX"
-[[ -n "${CLOUDFLARE_API_KEY:-}" ]] && REMOTE_PREFIX="CLOUDFLARE_API_KEY=$CLOUDFLARE_API_KEY $REMOTE_PREFIX"
+
+declare -a remote_env_vars
+[[ -n $DEBUG ]] && remote_env_vars+=("REMOTE_DEBUG=1")
+[[ -n $DRY_RUN ]] && remote_env_vars+=("DRY_RUN=1")
+
+REMOTE_PREFIX="${remote_env_vars[*]} bash -s -- $DOMAIN_PATH"
 
 if [[ -n $OUTPUT_FILE ]]; then
   csv=$("${SSH_CMD[@]}" "$REMOTE_PREFIX" 2> >(cat >&2) <<REMOTE_EOF
