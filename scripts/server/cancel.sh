@@ -1,6 +1,14 @@
 #!/bin/bash
 
-source "$(dirname "$0")/../.env"
+# source "$(dirname "$0")/../.env" # Is this necessary? 
+
+# Load environment variables from .env file if it exists
+SCRIPT_PATH="$(dirname "$(readlink -f "$0")")"
+if [ -f "$SCRIPT_PATH/../.env" ]; then
+  export "$(grep -v '^#' "$SCRIPT_PATH/../.env" | xargs)"
+else
+  echo "Warning: .env file not found. Using default environment variables."
+fi
 
 # Colors for messages
 GREEN='\033[0;32m'
@@ -140,3 +148,8 @@ mv "$ZIP_FILE" "$WP_CONTENT_DIR/"
 echo -e "${GREEN}Cancellation process for $FULL_DOMAIN completed successfully: https://$FULL_DOMAIN/wp-content/$FULL_DOMAIN.zip ${NC}"
 echo -e "NEW ADMIN EMAIL: ${NEW_ADMIN_EMAIL}"
 echo -e "NEW ADMIN PASS: ${RANDOM_PASSWORD}"
+
+CURRENT_EPOCH=$(date +%s)
+
+# Print the current epoch time to the site dir and save it to a file called 'cancellation-epoch.txt'
+echo "$CURRENT_EPOCH" > "$SITE_DIR/cancellation-epoch.txt"
