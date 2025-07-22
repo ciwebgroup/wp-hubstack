@@ -29,12 +29,14 @@ show_help() {
   echo "Options:"
   echo "  --help              Display this help message."
   echo "  --dry-run           Perform a trial run with no changes made."
+  echo "  --container-name-prefix  Prefix for the container name (default: 'wp_')."
   echo
 }
 
 
-# --- Add dry‐run flag and parse arguments ---
+# --- Add dry-run and container-prefix flags and parse arguments ---
 DRY_RUN=false
+CONTAINER_PREFIX="wp_"                # default prefix
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --help|-h)
@@ -44,6 +46,10 @@ while [[ $# -gt 0 ]]; do
     --dry-run)
       DRY_RUN=true
       shift
+      ;;
+    --container-name-prefix)
+      CONTAINER_PREFIX="$2"
+      shift 2
       ;;
     *)
       break
@@ -56,22 +62,45 @@ if [ -z "$1" ]; then
   echo -e "${RED}Error: Domain parameter is required.${NC}"
   echo "Run '$0 --help' for usage."
   exit 1
-fi  
+fi
 
-# Check if zip is installed
-if ! command -v zip &> /dev/null; then
-  echo -e "${RED}Error: 'zip' is not installed.${NC}"
-  echo "Please install it using: apt-get install zip"
+FULL_DOMAIN=$1
+NEW_ADMIN_EMAIL=$2
+
+# --- Discover the matching container by WP_HOME ---
+MATCHED_CONTAINER=""
+for cont in $(docker ps --format='{{.Names}}' | grep "^${CONTAINER_PREFIX}"); do
+  WP_HOME=$(docker inspect "$cont" \
+    | jq -r '.[].Config.Env | map(select(contains("WP_HOME="))) | .[0] | split("=")[1]')
+  if [[ "$WP_HOME" == *"$FULL_DOMAIN"* ]]; then
+    MATCHED_CONTAINER="$cont"
+    break
+  fi
+done
+
+if [ -z "$MATCHED_CONTAINER" ]; then
+  echo -e "${RED}Error: No container with prefix '${CONTAINER_PREFIX}' has WP_HOME matching '${FULL_DOMAIN}'.${NC}"
   exit 1
 fi
 
-# Extract domain and remove TLD
-FULL_DOMAIN=$1
-NEW_ADMIN_EMAIL=$2
-BASE_DOMAIN=$(echo "$FULL_DOMAIN" | sed -E 's/\.[a-z]{2,}$//')
-CONTAINER_NAME="wp_$(echo "${BASE_DOMAIN}" | sed 's/-//g')"
-# CONTAINER_NAME="wp_${BASE_DOMAIN}"
-SITE_DIR="$SCRIPT_PATH/${FULL_DOMAIN}"
+CONTAINER_NAME="$MATCHED_CONTAINER"
+
+echo "Container found: $CONTAINER_NAME"
+
+# Grab the container’s working directory and switch into it
+WORKING_DIR=$(docker inspect "$CONTAINER_NAME" \
+  | jq -r '.[].Config.Labels["com.docker.compose.project.working_dir"]')
+if [ ! -d "$WORKING_DIR" ]; then
+  echo -e "${RED}Error: Working dir '$WORKING_DIR' from container not found locally.${NC}"
+  exit 1
+fi
+pushd "$WORKING_DIR" > /dev/null || {
+  echo -e "${RED}Error: Could not change to working directory '$WORKING_DIR'.${NC}"
+  exit 1
+}
+
+# Now SITE_DIR is relative to this working directory
+SITE_DIR="$WORKING_DIR"
 ZIP_FILE="${SITE_DIR}.zip"
 WP_CONTENT_DIR="${SITE_DIR}/www/wp-content"
 
@@ -90,7 +119,14 @@ OPTIONS_TO_REMOVE=(
 
 # Function to run wp-cli command inside Docker container
 run_wp() {
-  docker exec -i "$CONTAINER_NAME" wp "$@" --skip-themes --quiet
+  # figure out where WP lives inside the container
+  local CONTAINER_WORKDIR
+  CONTAINER_WORKDIR=$(
+    docker inspect "$CONTAINER_NAME" \
+      | jq -r '.[].Config.WorkingDir // "/var/www/html"'
+  )
+  docker exec -w "$CONTAINER_WORKDIR" \
+    "$CONTAINER_NAME" wp "$@" --skip-themes --quiet
 }
 
 # Verify that the domain's directory exists
@@ -161,10 +197,11 @@ fi
 
 # Export the database
 if [[ "$DRY_RUN" == true ]]; then
-  echo "[DRY RUN] Would export DB to wp-content/mysql.sql"
+  echo "[DRY_RUN] Would export DB to ${WP_CONTENT_DIR}/mysql.sql"
 else
   echo "Exporting database for $FULL_DOMAIN"
-  run_wp db export "wp-content/mysql.sql"
+  # remove any old directory named mysql.sql
+  docker exec "$CONTAINER_NAME" wp db export
 fi
 
 # Zip the site directory
@@ -172,7 +209,12 @@ if [[ "$DRY_RUN" == true ]]; then
   echo "[DRY RUN] Would zip ${SITE_DIR} to ${ZIP_FILE}"
 else
   echo "Zipping site directory to ${ZIP_FILE}..."
-  zip -rq "$ZIP_FILE" "$SITE_DIR"
+  # Exclude any existing zip/tar files and any directory whose name contains "backup"
+  (
+    cd "$(dirname "$SITE_DIR")" \
+      && zip -rq "$ZIP_FILE" "$(basename "$SITE_DIR")" \
+        -x "*backup*" "*.zip" "*.tar.gz" "*.tgz"
+  )
   echo -e "\n${GREEN}Zipping completed.${NC}"
 fi
 
