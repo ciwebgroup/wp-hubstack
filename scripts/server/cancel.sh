@@ -17,7 +17,7 @@ NC='\033[0m' # No color
 
 # Function to display help
 show_help() {
-  echo "Usage: $0 <domain> [NEW_ADMIN_EMAIL] [--help]"
+  echo "Usage: $0 <domain> [NEW_ADMIN_EMAIL] [--dry-run] [--help]"
   echo
   echo "Script to cancel a WordPress site by deactivating plugins, removing license keys,"
   echo "exporting the database, and archiving the site directory."
@@ -28,15 +28,28 @@ show_help() {
   echo
   echo "Options:"
   echo "  --help              Display this help message."
+  echo "  --dry-run           Perform a trial run with no changes made."
   echo
 }
 
 
-# Check for --help flag
-if [[ "$1" == "--help" || "$1" == "-h" ]]; then
-  show_help
-  exit 0
-fi  
+# --- Add dry‐run flag and parse arguments ---
+DRY_RUN=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help|-h)
+      show_help
+      exit 0
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
 # Validate domain parameter
 if [ -z "$1" ]; then
@@ -92,45 +105,76 @@ if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
   exit 1
 fi
 
+# Announce dry‐run
+if [[ "$DRY_RUN" == true ]]; then
+  echo -e "${GREEN}[DRY RUN] No changes will be made.${NC}"
+fi
+
 # Disconnect from malcare
-run_wp malcare disconnect
+if [[ "$DRY_RUN" == true ]]; then
+  echo "[DRY RUN] Would run: wp malcare disconnect"
+else
+  run_wp malcare disconnect
+fi
 
 # Remove specified options
 echo "Removing specified WordPress options..."
 for OPTION in "${OPTIONS_TO_REMOVE[@]}"; do
-  echo "Removing option: $OPTION"
-  run_wp option delete "$OPTION"
+  if [[ "$DRY_RUN" == true ]]; then
+    echo "[DRY RUN] Would delete option: $OPTION"
+  else
+    echo "Removing option: $OPTION"
+    run_wp option delete "$OPTION"
+  fi
 done
 
-# Update specified option
-echo "Updating option: _transient_astra-addon_license_status to value 0"
-run_wp option update "_transient_astra-addon_license_status" 0
+# Update transient
+if [[ "$DRY_RUN" == true ]]; then
+  echo "[DRY RUN] Would update _transient_astra-addon_license_status to 0"
+else
+  echo "Updating option: _transient_astra-addon_license_status to value 0"
+  run_wp option update "_transient_astra-addon_license_status" 0
+fi
 
-# Update admin_email if NEW_ADMIN_EMAIL is provided
+# Update admin_email
 if [ -n "$NEW_ADMIN_EMAIL" ]; then
-  echo "Updating 'admin_email' to $NEW_ADMIN_EMAIL"
-  if run_wp option update "admin_email" "$NEW_ADMIN_EMAIL"; then
-    echo -e "${GREEN}Admin email updated successfully to $NEW_ADMIN_EMAIL.${NC}"
+  if [[ "$DRY_RUN" == true ]]; then
+    echo "[DRY RUN] Would update admin_email to $NEW_ADMIN_EMAIL"
   else
-    echo -e "${RED}Failed to update admin_email.${NC}"
+    echo "Updating 'admin_email' to $NEW_ADMIN_EMAIL"
+    run_wp option update "admin_email" "$NEW_ADMIN_EMAIL" \
+      && echo -e "${GREEN}Admin email updated successfully.${NC}" \
+      || echo -e "${RED}Failed to update admin_email.${NC}"
   fi
 else
-    NEW_ADMIN_EMAIL=$ADMIN_EMAIL
+  NEW_ADMIN_EMAIL=$ADMIN_EMAIL
 fi
 
 # Add a new admin user
 RANDOM_PASSWORD=$(< /dev/urandom tr -dc 'A-Za-z0-9' | head -c12)
-run_wp user create $NEW_ADMIN_EMAIL $NEW_ADMIN_EMAIL --role=administrator --display_name="New Admin" --user_nicename="New Admin" --first_name="New" --last_name="Admin" --user_pass="${RANDOM_PASSWORD}"
-run_wp user update $NEW_ADMIN_EMAIL $NEW_ADMIN_EMAIL --role=administrator --display_name="New Admin" --user_nicename="New Admin" --first_name="New" --last_name="Admin" --user_pass="${RANDOM_PASSWORD}"
+if [[ "$DRY_RUN" == true ]]; then
+  echo "[DRY RUN] Would create admin user $NEW_ADMIN_EMAIL with password $RANDOM_PASSWORD"
+else
+  run_wp user create $NEW_ADMIN_EMAIL $NEW_ADMIN_EMAIL --role=administrator --display_name="New Admin" --user_nicename="New Admin" --first_name="New" --last_name="Admin" --user_pass="${RANDOM_PASSWORD}"
+  run_wp user update $NEW_ADMIN_EMAIL $NEW_ADMIN_EMAIL --role=administrator --display_name="New Admin" --user_nicename="New Admin" --first_name="New" --last_name="Admin" --user_pass="${RANDOM_PASSWORD}"
+fi
 
 # Export the database
-echo "Exporting database for $FULL_DOMAIN"
-run_wp db export "wp-content/mysql.sql"
+if [[ "$DRY_RUN" == true ]]; then
+  echo "[DRY RUN] Would export DB to wp-content/mysql.sql"
+else
+  echo "Exporting database for $FULL_DOMAIN"
+  run_wp db export "wp-content/mysql.sql"
+fi
 
-# Zip the site directory quietly with progress dots
-echo "Zipping site directory to ${ZIP_FILE}..."
-zip -rq "$ZIP_FILE" "$SITE_DIR"
-echo -e "\n${GREEN}Zipping completed.${NC}"
+# Zip the site directory
+if [[ "$DRY_RUN" == true ]]; then
+  echo "[DRY RUN] Would zip ${SITE_DIR} to ${ZIP_FILE}"
+else
+  echo "Zipping site directory to ${ZIP_FILE}..."
+  zip -rq "$ZIP_FILE" "$SITE_DIR"
+  echo -e "\n${GREEN}Zipping completed.${NC}"
+fi
 
 # Ensure wp-content directory exists
 if [ ! -d "$WP_CONTENT_DIR" ]; then
@@ -139,11 +183,15 @@ if [ ! -d "$WP_CONTENT_DIR" ]; then
 fi
 
 # Change ownership of the zip file and move it to wp-content
-echo "Changing ownership of the zip file to www-data:www-data"
-chown www-data:www-data "$ZIP_FILE"
+if [[ "$DRY_RUN" == true ]]; then
+  echo "[DRY RUN] Would chown and mv ${ZIP_FILE} into ${WP_CONTENT_DIR}/"
+else
+  echo "Changing ownership of the zip file to www-data:www-data"
+  chown www-data:www-data "$ZIP_FILE"
 
-echo "Moving zip file to wp-content directory: ${WP_CONTENT_DIR}"
-mv "$ZIP_FILE" "$WP_CONTENT_DIR/"
+  echo "Moving zip file to wp-content directory: ${WP_CONTENT_DIR}"
+  mv "$ZIP_FILE" "$WP_CONTENT_DIR/"
+fi
 
 echo -e "${GREEN}Cancellation process for $FULL_DOMAIN completed successfully: https://$FULL_DOMAIN/wp-content/$FULL_DOMAIN.zip ${NC}"
 echo -e "NEW ADMIN EMAIL: ${NEW_ADMIN_EMAIL}"
@@ -152,4 +200,8 @@ echo -e "NEW ADMIN PASS: ${RANDOM_PASSWORD}"
 CURRENT_EPOCH=$(date +%s)
 
 # Print the current epoch time to the site dir and save it to a file called 'cancellation-epoch.txt'
-echo "$CURRENT_EPOCH" > "$SITE_DIR/cancellation-epoch.txt"
+if [[ "$DRY_RUN" == true ]]; then
+  echo "[DRY RUN] Would write epoch $CURRENT_EPOCH to ${SITE_DIR}/cancellation-epoch.txt"
+else
+  echo "$CURRENT_EPOCH" > "$SITE_DIR/cancellation-epoch.txt"
+fi
