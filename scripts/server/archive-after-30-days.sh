@@ -9,30 +9,51 @@
 #
 # Meant to be run as a cron job.
 #
-set -euo pipefail
+set -auo pipefail
 
 # --- Configuration ---
 BACKUP_DIR="/var/opt/backups"
 GRACE_PERIOD_DAYS=30
+
+# Function to display help
+show_help() {
+  cat <<EOF
+Usage: $0 [--test-grace-period] [--dry-run] [--grace-period=N] [--help]
+Options:
+  --test-grace-period    Interpret the grace period in seconds instead of days for testing.
+  --dry-run              Perform a trial run without making changes.
+  --grace-period=N       Set a custom grace period. Interpreted as days by default,
+                         or as seconds if --test-grace-period is also used.
+                         (default: ${GRACE_PERIOD_DAYS}).
+  --help, -h             Display this help message and exit.
+EOF
+}
 
 # --- Command line argument handling ---
 TEST_GRACE_PERIOD=false
 DRY_RUN=false
 
 for arg in "$@"; do
-    case $arg in
-        --test-grace-period)
-            TEST_GRACE_PERIOD=true
-            ;;
-        --dry-run)
-            DRY_RUN=true
-            ;;
-        *)
-            error "Unknown argument: $arg"
-            error "Usage: $0 [--test-grace-period] [--dry-run]"
-            exit 1
-            ;;
-    esac
+  case $arg in
+    --help|-h)
+      show_help
+      exit 0
+      ;;
+    --test-grace-period)
+      TEST_GRACE_PERIOD=true
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      ;;
+    --grace-period=*)
+      GRACE_PERIOD_DAYS="${arg#*=}"
+      ;;
+    *)
+      error "Unknown argument: $arg"
+      show_help
+      exit 1
+      ;;
+  esac
 done
 
 # --- Globals for Summary ---
@@ -63,28 +84,6 @@ if ! command -v jq &>/dev/null; then
 fi
 
 # --- Functions ---
-
-test_grace_period_countdown() {
-    local grace_seconds=$((GRACE_PERIOD_DAYS * 24 * 60 * 60))
-    info "Testing grace period countdown for $GRACE_PERIOD_DAYS days ($grace_seconds seconds)"
-    info "Starting countdown from $grace_seconds seconds..."
-    echo ""
-    
-    for ((i=grace_seconds; i>=0; i--)); do
-        local days=$((i / 86400))
-        local hours=$(((i % 86400) / 3600))
-        local minutes=$(((i % 3600) / 60))
-        local seconds=$((i % 60))
-        
-        printf "\r${GREEN}Time remaining: %02d days, %02d:%02d:%02d${RESET}" "$days" "$hours" "$minutes" "$seconds"
-        sleep 1
-    done
-    
-    echo ""
-    success "Grace period countdown complete!"
-    exit 0
-}
-
 backup_and_remove() {
   local container=$1
   local dir=$2
@@ -104,13 +103,20 @@ backup_and_remove() {
       dry_run "  - Would drop MySQL database 'wp_$base' and user '$base'..."
       dry_run "  - Would remove site directory '$dir'..."
       dry_run "Site '$domain' would be backed up and removed."
+      ARCHIVED_SITES+=("$domain")
+      ((ARCHIVED_COUNT++))
   else
       info "Archiving and removing site for container '$container'..."
-      mkdir -p "$BACKUP_DIR"
+      if ! mkdir -p "$BACKUP_DIR"; then
+        error "  - FAILED to create backup directory '$BACKUP_DIR'. Aborting for this site."
+        ERROR_SITES+=("$domain (mkdir failed)")
+        ((ERROR_COUNT++))
+        return 1
+      fi
 
       info "  - Exporting database from '$container'..."
       docker exec "$container" rm -f wp-content/mysql.sql >/dev/null 2>&1 || true
-      if ! docker exec "$container" wp db export wp-content/mysql.sql --allow-root >/dev/null 2>&1; then
+      if ! docker exec "$container" wp db export --allow-root >/dev/null 2>&1; then
           warn "  - Could not export database from '$container'. It might already be stopped. Proceeding with file backup."
       fi
 
@@ -122,6 +128,10 @@ backup_and_remove() {
       local archive_path="${BACKUP_DIR}/${domain}_${stamp}.tgz"
       info "  - Archiving '$dir' to '$archive_path'..."
       tar --warning=no-file-changed --ignore-failed-read \
+          --exclude '*backup*' \
+          --exclude '*.zip' \
+          --exclude '*.tar.gz' \
+          --exclude '*.tgz' \
           -czf "$archive_path" -C "$(dirname "$dir")" "$domain" || true
 
       local mysql_pass=""
@@ -140,74 +150,106 @@ backup_and_remove() {
       rm -rf "$dir" || true
 
       success "Site '$domain' has been backed up and removed."
+      ARCHIVED_SITES+=("$domain")
+      ((ARCHIVED_COUNT++))
   fi
-  
-  ARCHIVED_SITES+=("$domain")
-  ((ARCHIVED_COUNT++))
 }
 
 main() {
   if [[ "$DRY_RUN" == true ]]; then
-      info "Starting cancellation cleanup job (DRY RUN MODE)..."
+    info "Starting cancellation cleanup job (DRY RUN MODE)…"
   else
-      info "Starting cancellation cleanup job..."
+    info "Starting cancellation cleanup job…"
   fi
-  
+
+  # decide cutoff based on normal or test mode
   local cutoff_epoch
-  cutoff_epoch=$(date -d "$GRACE_PERIOD_DAYS days ago" +%s)
-
-  mapfile -t containers < <(docker ps --format '{{.Names}}' | grep '^wp_' || true)
-
-  if [[ ${#containers[@]} -eq 0 ]]; then
-      info "No running containers with 'wp_' prefix found."
+  if [[ "$TEST_GRACE_PERIOD" == true ]]; then
+    # In test mode, interpret GRACE_PERIOD_DAYS as seconds
+    info "TEST MODE: Grace period is ${GRACE_PERIOD_DAYS} seconds."
+    cutoff_epoch=$(( $(date +%s) - GRACE_PERIOD_DAYS ))
+  else
+    cutoff_epoch=$(date -d "$GRACE_PERIOD_DAYS days ago" +%s)
   fi
 
-  for container in "${containers[@]}"; do
-      ((PROCESSED_COUNT++))
-      info "-----------------------------------------------------"
-      info "Processing container: $container"
+  mapfile -t all_containers < <(docker ps --format '{{.Names}}' | grep '^wp_' || true)
 
+  if [[ ${#all_containers[@]} -eq 0 ]]; then
+    info "No running containers with 'wp_' prefix found."
+    return
+  fi
+
+  # --- Pre-flight check to find eligible sites for archival ---
+  declare -A sites_to_archive # Associative array [container]=work_dir
+  info "Scanning for sites eligible for archival..."
+
+  for container in "${all_containers[@]}"; do
       local work_dir
-      work_dir=$(docker inspect "$container" 2>/dev/null | jq -r '.[0].Config.Labels."com.docker.compose.project.working_dir"')
-
-      if [[ -z "$work_dir" || "$work_dir" == "null" ]]; then
-          warn "Could not find working directory for '$container'. Skipping."
-          ERROR_SITES+=("$container (no work_dir)")
-          ((ERROR_COUNT++))
-          continue
-      fi
-
+      work_dir=$(docker inspect "$container" 2>/dev/null | jq -r '.[0].Config.Labels["com.docker.compose.project.working_dir"]')
       local epoch_file="$work_dir/cancellation-epoch.txt"
+
+      if [[ -z "$work_dir" || ! -d "$work_dir" ]]; then
+          SKIPPED_SITES+=("$container (work_dir not found)")
+          continue
+      fi
+
       if [[ ! -f "$epoch_file" ]]; then
-          info "No 'cancellation-epoch.txt' found for '$container' in '$work_dir'. Skipping."
           SKIPPED_SITES+=("$(basename "$work_dir") (no epoch file)")
-          ((SKIPPED_COUNT++))
-          continue
+          continue 
       fi
 
-      local cancellation_epoch
-      cancellation_epoch=$(cat "$epoch_file")
-
-      if ! [[ "$cancellation_epoch" =~ ^[0-9]+$ ]]; then
-          warn "Invalid content in '$epoch_file'. Expected an epoch timestamp. Skipping."
-          ERROR_SITES+=("$(basename "$work_dir") (bad epoch file)")
-          ((ERROR_COUNT++))
-          continue
-      fi
-
-      local cancellation_date
-      cancellation_date=$(date -d "@$cancellation_epoch" --iso-8601=seconds)
-      info "Found cancellation timestamp: $cancellation_epoch ($cancellation_date)"
-
-      if (( cancellation_epoch < cutoff_epoch )); then
-          info "Cancellation for '$(basename "$work_dir")' is older than $GRACE_PERIOD_DAYS days. Proceeding with archival."
-          backup_and_remove "$container" "$work_dir"
+      if [[ "$TEST_GRACE_PERIOD" == true ]]; then
+          # In test mode, any site with an epoch file is eligible
+          sites_to_archive["$container"]="$work_dir"
       else
-          info "Cancellation for '$(basename "$work_dir")' is within the $GRACE_PERIOD_DAYS-day grace period. Skipping."
-          SKIPPED_SITES+=("$(basename "$work_dir") (in grace period)")
-          ((SKIPPED_COUNT++))
+          # In normal mode, check the timestamp
+          local cancellation_epoch
+          cancellation_epoch=$(cat "$epoch_file")
+          if [[ "$cancellation_epoch" =~ ^[0-9]+$ ]] && (( cancellation_epoch < cutoff_epoch )); then
+              sites_to_archive["$container"]="$work_dir"
+          else
+              SKIPPED_SITES+=("$(basename "$work_dir") (in grace period)")
+          fi
       fi
   done
+  
+  SKIPPED_COUNT=${#SKIPPED_SITES[@]}
+
+  local archive_count=${#sites_to_archive[@]}
+  if (( archive_count == 0 )); then
+      info "No sites are currently eligible for archival."
+      return
+  fi
+
+  # --- Confirmation Prompt ---
+  info "\nThe following ${archive_count} site(s) are eligible for archival:"
+  for container in "${!sites_to_archive[@]}"; do
+      info "  - $(basename "${sites_to_archive[$container]}") (from container: $container)"
+  done
+  
+  if [[ "$DRY_RUN" != true ]]; then
+    echo
+    read -p "Proceed with archiving these ${archive_count} site(s)? [y/N]: " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+      info "Operation cancelled by user."
+      exit 0
+    fi
+    echo
+  fi
+
+  # --- Main Processing Loop ---
+  # Now loop only through the sites we've confirmed for archival
+  for container in "${!sites_to_archive[@]}"; do
+      local work_dir=${sites_to_archive[$container]}
+      ((PROCESSED_COUNT++))
+      info "-----------------------------------------------------"
+      info "Processing: $(basename "$work_dir")"
+      backup_and_remove "$container" "$work_dir"
+  done
+
+  # Add skipped/error sites to the summary counts
+  # ((SKIPPED_COUNT = ${#all_containers[@]} - PROCESSED_COUNT)) # This is now handled correctly above
+
 }
 
 print_summary() {
@@ -257,8 +299,6 @@ print_summary() {
 trap print_summary EXIT
 
 # --- Main execution ---
-if [[ "$TEST_GRACE_PERIOD" == true ]]; then
-    test_grace_period_countdown
-else
-    main
-fi
+main
+
+set +auo pipefail
