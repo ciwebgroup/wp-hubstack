@@ -64,7 +64,7 @@ if [ -z "$1" ]; then
   exit 1
 fi
 
-FULL_DOMAIN=$1
+DOMAIN_SEARCH_PHRASE=$1
 NEW_ADMIN_EMAIL=$2
 
 # --- Discover the matching container by WP_HOME ---
@@ -72,14 +72,14 @@ MATCHED_CONTAINER=""
 for cont in $(docker ps --format='{{.Names}}' | grep "^${CONTAINER_PREFIX}"); do
   WP_HOME=$(docker inspect "$cont" \
     | jq -r '.[].Config.Env | map(select(contains("WP_HOME="))) | .[0] | split("=")[1]')
-  if [[ "$WP_HOME" == *"$FULL_DOMAIN"* ]]; then
+  if [[ "$WP_HOME" == *"$DOMAIN_SEARCH_PHRASE"* ]]; then
     MATCHED_CONTAINER="$cont"
     break
   fi
 done
 
 if [ -z "$MATCHED_CONTAINER" ]; then
-  echo -e "${RED}Error: No container with prefix '${CONTAINER_PREFIX}' has WP_HOME matching '${FULL_DOMAIN}'.${NC}"
+  echo -e "${RED}Error: No container with prefix '${CONTAINER_PREFIX}' has WP_HOME matching '${DOMAIN_SEARCH_PHRASE}'.${NC}"
   exit 1
 fi
 
@@ -100,8 +100,14 @@ pushd "$WORKING_DIR" > /dev/null || {
 }
 
 # Now SITE_DIR is relative to this working directory
+
+# Remove any trailing slashes or "http://" or "https://" from $WP_HOME
+WP_HOME=$(echo "$WP_HOME" | sed -e 's|^https\?://||' -e 's|^http://||' -e 's|/$||' -e 's|/$||')
+
+echo "WP_HOME after cleanup: $WP_HOME"
+
 SITE_DIR="$WORKING_DIR"
-ZIP_FILE="${SITE_DIR}.zip"
+ZIP_FILE="${WP_HOME}.zip"
 WP_CONTENT_DIR="${SITE_DIR}/www/wp-content"
 
 # Options to remove
@@ -199,7 +205,7 @@ fi
 if [[ "$DRY_RUN" == true ]]; then
   echo "[DRY_RUN] Would export DB to ${WP_CONTENT_DIR}/mysql.sql"
 else
-  echo "Exporting database for $FULL_DOMAIN"
+  echo "Exporting database for $DOMAIN_SEARCH_PHRASE"
   # remove any old directory named mysql.sql
   docker exec "$CONTAINER_NAME" wp db export
 fi
@@ -214,6 +220,15 @@ else
     cd "$(dirname "$SITE_DIR")" \
       && zip -rq "$ZIP_FILE" "$(basename "$SITE_DIR")" \
         -x "*backup*" "*.zip" "*.tar.gz" "*.tgz"
+    
+    # Move the zip file to the wp-content directory
+    if [ -f "$ZIP_FILE" ]; then
+      mv "$ZIP_FILE" "$WP_CONTENT_DIR/"
+    else
+      echo -e "${RED}Error: Zip file ${ZIP_FILE} was not created successfully.${NC}"
+      exit 1
+    fi
+
   )
   echo -e "\n${GREEN}Zipping completed.${NC}"
 fi
@@ -235,7 +250,7 @@ else
   mv "$ZIP_FILE" "$WP_CONTENT_DIR/"
 fi
 
-echo -e "${GREEN}Cancellation process for $FULL_DOMAIN completed successfully: https://$FULL_DOMAIN/wp-content/$FULL_DOMAIN.zip ${NC}"
+echo -e "${GREEN}Cancellation process for $WP_HOME completed successfully: https://$WP_HOME/wp-content/$WP_HOME.zip ${NC}"
 echo -e "NEW ADMIN EMAIL: ${NEW_ADMIN_EMAIL}"
 echo -e "NEW ADMIN PASS: ${RANDOM_PASSWORD}"
 
