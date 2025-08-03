@@ -1,6 +1,6 @@
 #!/bin/bash
 
-MAIN_PATH=$(readlink -f './main.py')
+MAIN_PATH="/var/opt/scripts/wp-update-suite/main.py"
 
 if [ ! -f "$MAIN_PATH" ]; then
 	echo "Error: main.py not found at $MAIN_PATH"
