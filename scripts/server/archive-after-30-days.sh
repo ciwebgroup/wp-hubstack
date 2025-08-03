@@ -18,13 +18,12 @@ GRACE_PERIOD_DAYS=30
 # Function to display help
 show_help() {
   cat <<EOF
-Usage: $0 [--test-grace-period] [--dry-run] [--grace-period=N] [--help]
+Usage: $0 [--test-grace-period] [--dry-run] [--grace-period=N] [--time-offset=HOURS] [--help]
 Options:
   --test-grace-period    Interpret the grace period in seconds instead of days for testing.
   --dry-run              Perform a trial run without making changes.
-  --grace-period=N       Set a custom grace period. Interpreted as days by default,
-                         or as seconds if --test-grace-period is also used.
-                         (default: ${GRACE_PERIOD_DAYS}).
+  --grace-period=N       Set a custom grace period in days (or seconds if --test-grace-period).
+  --time-offset=HOURS    Offset displayed timestamps by HOURS (default: -5 for EST).
   --help, -h             Display this help message and exit.
 EOF
 }
@@ -32,27 +31,22 @@ EOF
 # --- Command line argument handling ---
 TEST_GRACE_PERIOD=false
 DRY_RUN=false
+TIME_OFFSET_HOURS=-5
 
 for arg in "$@"; do
   case $arg in
     --help|-h)
-      show_help
-      exit 0
-      ;;
+      show_help; exit 0;;
     --test-grace-period)
-      TEST_GRACE_PERIOD=true
-      ;;
+      TEST_GRACE_PERIOD=true; shift;;
     --dry-run)
-      DRY_RUN=true
-      ;;
+      DRY_RUN=true; shift;;
     --grace-period=*)
-      GRACE_PERIOD_DAYS="${arg#*=}"
-      ;;
+      GRACE_PERIOD_DAYS="${arg#*=}"; shift;;
+    --time-offset=*)
+      TIME_OFFSET_HOURS="${arg#*=}"; shift;;
     *)
-      error "Unknown argument: $arg"
-      show_help
-      exit 1
-      ;;
+      error "Unknown argument: $arg"; show_help; exit 1;;
   esac
 done
 
@@ -64,6 +58,9 @@ PROCESSED_COUNT=0
 declare -a ARCHIVED_SITES
 declare -a SKIPPED_SITES
 declare -a ERROR_SITES
+
+# <- Add this so sites_to_archive is always bound even under -u
+sites_to_archive=()
 
 # --- Colors for logging ---
 GREEN='\e[32m'; YELLOW='\e[33m'; RED='\e[91m'; BLUE='\e[34m'; RESET='\e[0m'
@@ -179,10 +176,7 @@ main() {
     return
   fi
 
-  # --- Pre-flight check to find eligible sites for archival ---
-  declare -A sites_to_archive # Associative array [container]=work_dir
   info "Scanning for sites eligible for archival..."
-
   for container in "${all_containers[@]}"; do
       local work_dir
       work_dir=$(docker inspect "$container" 2>/dev/null | jq -r '.[0].Config.Labels["com.docker.compose.project.working_dir"]')
@@ -205,17 +199,45 @@ main() {
           # In normal mode, check the timestamp
           local cancellation_epoch
           cancellation_epoch=$(cat "$epoch_file")
+
           if [[ "$cancellation_epoch" =~ ^[0-9]+$ ]] && (( cancellation_epoch < cutoff_epoch )); then
               sites_to_archive["$container"]="$work_dir"
           else
-              SKIPPED_SITES+=("$(basename "$work_dir") (in grace period)")
+              # Compute how much time remains under the grace period
+              local now_epoch period_seconds expiration_epoch time_remaining
+              now_epoch=$(date +%s)
+              period_seconds=$(( GRACE_PERIOD_DAYS * 86400 ))
+              expiration_epoch=$(( cancellation_epoch + period_seconds ))
+              time_remaining=$(( expiration_epoch - now_epoch ))
+              (( time_remaining < 0 )) && time_remaining=0
+
+              # apply time-zone offset
+              local offset_seconds=$(( TIME_OFFSET_HOURS * 3600 ))
+              local expiration_local_epoch=$(( expiration_epoch + offset_seconds ))
+
+              # breakdown remaining time
+              local days hours minutes seconds
+              days=$(( time_remaining / 86400 ))
+              hours=$(( (time_remaining % 86400) / 3600 ))
+              minutes=$(( (time_remaining % 3600) / 60 ))
+              seconds=$(( time_remaining % 60 ))
+
+              # format expiration date as US standard time
+              local expiration_date
+              expiration_date=$(date -d "@${expiration_local_epoch}" '+%m/%d/%Y %I:%M:%S %p')
+
+              SKIPPED_SITES+=("$(basename "$work_dir") \
+(in grace period: ${days}d ${hours}h ${minutes}m ${seconds}s remaining; \
+estimated archival: ${expiration_date})")
           fi
       fi
   done
   
   SKIPPED_COUNT=${#SKIPPED_SITES[@]}
 
+  # now this will always be safe:
   local archive_count=${#sites_to_archive[@]}
+
   if (( archive_count == 0 )); then
       info "No sites are currently eligible for archival."
       return
