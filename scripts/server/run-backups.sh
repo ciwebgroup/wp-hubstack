@@ -128,6 +128,11 @@ for pair in "${CONTAINER_PAIRS[@]}"; do
         fi
     else
         echo "Exporting DB in $container..."
+
+        # Delete all SQL files located in /var/www/html in the Docker container that are older than 1 day.
+
+        docker exec -u 0 "$container" find /var/www/html -name "*.sql" -type f -mtime +5 -exec rm -f {} \;
+
         docker exec -u 0 "$container" wp --allow-root db export
 
         echo "Creating tarball..."
