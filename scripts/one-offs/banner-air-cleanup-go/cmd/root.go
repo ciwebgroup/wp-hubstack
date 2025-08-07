@@ -281,13 +281,43 @@ func worker(ctx context.Context, wg *sync.WaitGroup, postChan <-chan Post, resul
 }
 
 func analyzeContentViaAI(ctx context.Context, client *genai.Client, content string) (*AIResult, error) {
-	prompt := `Analyze the following content and provide insights on potential issues. The idea is to identify whether the content is spam or legitimate as it relates to the intent and purpose of the website. Classify the content as 'Spam', 'Legitimate', or 'Uncertain' and provide a brief justification for your choice. Please return the classification and justification in valid JSON format like so: {"classification": "Spam", "justification": "..."}. Important: If you use double-quotes inside the "justification" string, you must escape them with a backslash (e.g., \"some quoted text\"). Below is the about page description of the website to help you understand its purpose: Greer’s Banner Air of Bakersfield, Inc. is Bakersfield’s expert heating & cooling company. We offer furnace and air conditioning services in and around Bakersfield. Please, feel free to contact us for more information on our services, products, and company.`
+	prompt := `
+Analyze the following content to determine if it is 'Spam', 'Legitimate', or 'Uncertain' based on the website's purpose.
 
-	fullPrompt := fmt.Sprintf("%s\n\n---\n\nCONTENT TO ANALYZE:\n%s", prompt, content)
+**CRITICAL OUTPUT REQUIREMENTS:**
+1.  Your entire response MUST be a single, valid JSON object. Do not wrap it in markdown backticks.
+2.  The JSON object must contain exactly two keys: "classification" and "justification".
+3.  The "justification" value MUST be a string.
+4.  **MOST IMPORTANT RULE:** If you use any double-quotes (") inside the "justification" string, you MUST escape them with a backslash (\").
+
+---
+**EXAMPLE 1: CORRECT FORMATTING**
+This is a good response because the inner quotes are escaped.
+{
+    "classification": "Spam",
+    "justification": "This content is spam because it mentions \"free money\" and links to a suspicious domain."
+}
+
+---
+**EXAMPLE 2: INCORRECT FORMATTING**
+This is a bad response because the inner quotes are NOT escaped, making the JSON invalid.
+{
+    "classification": "Spam",
+    "justification": "This content is spam because it mentions "free money" and links to a suspicious domain."
+}
+---
+
+**Website Context:**
+The website belongs to "Greer’s Banner Air of Bakersfield, Inc.", which is an expert heating & cooling (HVAC) company. Content should be related to furnace and air conditioning services.
+
+**CONTENT TO ANALYZE:**
+`
+
+	fullPrompt := fmt.Sprintf("%s\n%s", prompt, content)
 
 	result, err := client.Models.GenerateContent(
 		ctx,
-		"gemini-1.5-flash", // or "gemini-2.5-flash" if available and preferred
+		"gemini-1.5-flash",
 		genai.Text(fullPrompt),
 		nil,
 	)
@@ -295,13 +325,13 @@ func analyzeContentViaAI(ctx context.Context, client *genai.Client, content stri
 		return nil, fmt.Errorf("AI generation failed: %w", err)
 	}
 
-	rawJSON := result.Text()
-
-	if rawJSON == "" {
+	rawJSON, err := result.Text()
+	if err != nil {
 		return nil, fmt.Errorf("failed to extract text from AI response: %w", err)
 	}
-
-	// Verify that rawJSON is valid JSON
+	if rawJSON == "" {
+		return nil, fmt.Errorf("received an empty response from the AI")
+	}
 
 	cleanedJSON := strings.Trim(rawJSON, " \n\t`")
 	if after, ok := strings.CutPrefix(cleanedJSON, "json"); ok {
