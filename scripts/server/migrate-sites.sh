@@ -101,7 +101,8 @@ if [ "$DRY_RUN" = true ]; then
     if [ -n "$CONFIG_FILE" ]; then
         SITES_TO_MIGRATE=$(yq e 'keys | .[]' "$CONFIG_FILE")
     else
-        SITES_TO_MIGRATE=$(ls -d $DOMAIN_PATH/$SITES_GLOB 2>/dev/null | xargs -n 1 basename)
+        # Use find -print0 and xargs -0 to safely handle non-alphanumeric filenames
+        SITES_TO_MIGRATE=$(find "$DOMAIN_PATH" -maxdepth 1 -type d -name "$SITES_GLOB" -print0 2>/dev/null | xargs -0 -n 1 basename)
     fi
 
     if [ -z "$SITES_TO_MIGRATE" ]; then
@@ -240,11 +241,15 @@ function migrate_site() {
 
     if [[ $(echo "$RESPONSE" | jq -r '.success') == "true" ]]; then
         echo "DNS update successful for $SITE_TO_MIGRATE."
+        local final_dir="$DOMAIN_PATH/$SITE_TO_MIGRATE"
         if [ -n "$MV_TO_DIR" ]; then
             echo "Moving site directory to $MV_TO_DIR on source server."
             mkdir -p "$MV_TO_DIR"
             mv "$DOMAIN_PATH/$SITE_TO_MIGRATE" "$MV_TO_DIR/"
+            final_dir="$MV_TO_DIR/$SITE_TO_MIGRATE"
         fi
+        echo "Creating migration timestamp..."
+        date +%s > "$final_dir/migration_timestamp"
         if [ "$PAUSE_FOR_CONFIRM" = false ]; then
             echo "Now hurry and connect to $TARGET_SERVER and run: cd $DOMAIN_PATH/$SITE_TO_MIGRATE && docker compose up -d"
         fi
@@ -267,7 +272,7 @@ else
     if [[ $TARGET_SERVER != *"@"* ]]; then
         TARGET_SERVER="root@$TARGET_SERVER"
     fi
-    for SITE_TO_MIGRATE in $(ls -d $DOMAIN_PATH/$SITES_GLOB 2>/dev/null | xargs -n 1 basename); do
+    find "$DOMAIN_PATH" -maxdepth 1 -type d -name "$SITES_GLOB" -print0 2>/dev/null | xargs -0 -n1 basename | while IFS= read -r SITE_TO_MIGRATE; do
         migrate_site "$SITE_TO_MIGRATE" "$TARGET_SERVER" ""
         echo "----------------------------------------"
     done
