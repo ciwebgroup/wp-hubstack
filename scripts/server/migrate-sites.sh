@@ -8,7 +8,8 @@
 #   ./migrate-sites.sh --sites [a-c]*.com --target wp18.example.com
 #   ./migrate-sites.sh --config sites-to-migrate.yml --pause-to-confirm-migration
 
-source "$(dirname "$0")/../.env"
+# source "$(dirname "$0")/../.env"
+. .env
 
 CF_TOKEN=${CLOUDFLARE_API_TOKEN}
 CF_ACCOUNT_NUMBER=${CLOUDFLARE_ACCOUNT_NUMBER}
