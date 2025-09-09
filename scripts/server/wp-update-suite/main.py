@@ -6,11 +6,11 @@ import sys
 import os
 import argparse
 import re
-import shlex
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 import logging
-import glob
+import tarfile
+import shutil
 
 
 logging.basicConfig(
@@ -734,10 +734,26 @@ class WordPressUpdater:
             # Change back to the original directory
             os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
+    def _generate_inventory(self, container_name: str, asset_type: str) -> Optional[list]:
+        """Helper to get a JSON list of plugins or themes from the container."""
+        self.log(f"    Generating internal inventory for {asset_type}s...", logging.DEBUG)
+        cmd = ['wp', '--allow-root', asset_type, 'list', '--format=json']
+        result = self.docker_exec(container_name, cmd)
+        if result.returncode == 0 and result.stdout:
+            try:
+                return json.loads(result.stdout)
+            except json.JSONDecodeError:
+                self.log(f"Failed to parse {asset_type} inventory JSON.", logging.ERROR)
+                return None
+        else:
+            self.log(f"Failed to generate inventory for {asset_type}s from container '{container_name}'.", logging.ERROR)
+            self.log(f"Stderr: {result.stderr}", logging.DEBUG)
+            return None
+
     def mirror_wp_assets(self, container_name: str):
         """
-        Mirrors plugins and themes from a Docker container to the host.
-        This is a Python implementation of the mirror-wp-assets.sh script.
+        Mirrors plugins and themes from a Docker container to the host,
+        and verifies consistency by comparing inventories before and after.
         """
         print("\n" + "-"*50)
         print(f"🔗 Mirroring WP assets for container: '{container_name}'")
@@ -752,43 +768,90 @@ class WordPressUpdater:
         self.log(f"Found working directory: {self.working_dir}", logging.INFO)
 
         host_content_dir = os.path.join(self.working_dir, 'www', 'wp-content')
-        container_content_dir = '/var/www/html/wp-content'
+        host_plugins_dir = os.path.join(host_content_dir, 'plugins')
+        host_themes_dir = os.path.join(host_content_dir, 'themes')
+        container_plugins_dir = "/var/www/html/wp-content/plugins"
+        container_themes_dir = "/var/www/html/wp-content/themes"
 
-        # Define the subdirectories to mirror
-        subdirs = [
-            'plugins',
-            'themes',
-            'uploads'
-        ]
+        # --- Step 1: Generate "before" inventory ---
+        print("  🔍 Generating pre-mirror inventory from container...")
+        plugins_before = self._generate_inventory(container_name, 'plugin')
+        themes_before = self._generate_inventory(container_name, 'theme')
+        if plugins_before is None or themes_before is None:
+            print("  ❌ Could not generate initial inventory. Aborting mirror.")
+            return
 
-        # Mirror each subdirectory
-        for subdir in subdirs:
-            host_dir = os.path.join(host_content_dir, subdir)
-            container_dir = os.path.join(container_content_dir, subdir)
-
-            # Create the host directory if it doesn't exist
-            os.makedirs(host_dir, exist_ok=True)
-
-            # Rsync options:
-            # -a: archive mode (preserves permissions, timestamps, etc.)
-            # -u: skip files that are newer on the receiver
-            # --delete: delete files in the destination that are not present in the source
-            rsync_cmd = [
-                'docker', 'run', '--rm',
-                '-v', f"{host_dir}:/mnt/host_dir",
-                '-v', f"{container_name}:{container_dir}",
-                'alpine', 'sh', '-c',
-                f"apk add --no-cache rsync && rsync -au --delete /mnt/host_dir/ /{subdir}/"
-            ]
-
-            print(f"  📦 Mirroring {subdir}...")
-            result = subprocess.run(rsync_cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                print(f"    ✅ {subdir} mirrored successfully")
+        # --- Step 2: Create a tarball of existing host directories ---
+        if os.path.isdir(host_plugins_dir) or os.path.isdir(host_themes_dir):
+            tarball_path = os.path.join(self.working_dir, f"wp_content_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}_temp.tgz")
+            if self.dry_run:
+                print(f"  🔍 DRY RUN: Would create backup tarball of existing host directories at: {tarball_path}")
             else:
-                print(f"    ❌ Error mirroring {subdir}: {result.stderr}")
+                print("  💾 Creating backup tarball of existing host directories...")
+                try:
+                    with tarfile.open(tarball_path, "w:gz") as tar:
+                        if os.path.isdir(host_plugins_dir):
+                            tar.add(host_plugins_dir, arcname='plugins')
+                        if os.path.isdir(host_themes_dir):
+                            tar.add(host_themes_dir, arcname='themes')
+                    print(f"  ✅ Backup created at: {tarball_path}")
+                except Exception as e:
+                    self.log(f"Failed to create backup tarball: {e}", logging.ERROR)
+        else:
+            self.log("Host plugin/theme directories not found. Skipping backup.", logging.WARN)
 
-        print(f"🔗 WP assets mirroring completed for container: '{container_name}'")
+        # --- Step 3: Copy directories from Docker container to host ---
+        if self.dry_run:
+            print(f"  🔍 DRY RUN: Would remove existing host directory: '{host_plugins_dir}'")
+            print(f"  🔍 DRY RUN: Would remove existing host directory: '{host_themes_dir}'")
+            print(f"  🔍 DRY RUN: Would copy 'plugins' from '{container_name}:{container_plugins_dir}' to '{host_content_dir}'")
+            print(f"  🔍 DRY RUN: Would copy 'themes' from '{container_name}:{container_themes_dir}' to '{host_content_dir}'")
+            print(f"  ✅ Dry run for asset mirroring complete for '{container_name}'.")
+            return
+
+        print("  🔄 Copying directories from container to host...")
+        try:
+            if os.path.isdir(host_plugins_dir):
+                shutil.rmtree(host_plugins_dir)
+            if os.path.isdir(host_themes_dir):
+                shutil.rmtree(host_themes_dir)
+
+            print("    📥 Copying 'plugins' from container...")
+            subprocess.run(['docker', 'cp', f"{container_name}:{container_plugins_dir}", host_content_dir], check=True, capture_output=True)
+            
+            print("    📥 Copying 'themes' from container...")
+            subprocess.run(['docker', 'cp', f"{container_name}:{container_themes_dir}", host_content_dir], check=True, capture_output=True)
+            
+            print("  ✅ Finished copying files from container.")
+        except (subprocess.CalledProcessError, Exception) as e:
+            stderr = e.stderr.decode() if hasattr(e, 'stderr') else str(e)
+            self.log(f"Error during asset mirroring: {stderr}", logging.ERROR)
+            return
+
+        # --- Step 4: Generate "after" inventory and compare ---
+        print("  🔍 Generating post-mirror inventory for verification...")
+        plugins_after = self._generate_inventory(container_name, 'plugin')
+        themes_after = self._generate_inventory(container_name, 'theme')
+
+        final_status = True
+        if plugins_before != plugins_after:
+            print("  ❌ Plugin inventories differ after copy operation. This is unexpected.")
+            final_status = False
+        else:
+            print("  ✅ Plugin inventories are identical. Verification successful.")
+
+        if themes_before != themes_after:
+            print("  ❌ Theme inventories differ after copy operation. This is unexpected.")
+            final_status = False
+        else:
+            print("  ✅ Theme inventories are identical. Verification successful.")
+
+        if final_status:
+            print(f"\n🔗 Asset mirroring and verification complete for '{container_name}'.")
+        else:
+            print(f"\n⚠️ Asset mirroring for '{container_name}' completed, but with verification errors.")
+        print("-" * 50)
+
 
 def parse_container_names_arg(arg) -> list:
     """Parse --container-names argument from file, pipebar, or stdin, supporting both | and \\n delimiters."""
