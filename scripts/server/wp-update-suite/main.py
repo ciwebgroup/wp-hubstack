@@ -71,14 +71,25 @@ class WordPressUpdater:
             print(f"❌ Error getting working directory for '{container_name}': {e}")
             return None
     
-    def docker_exec(self, container_name: str, command: List[str]) -> subprocess.CompletedProcess:
+    def docker_exec(self, container_name: str, command: List[str], docker_opts: List[str] = None) -> subprocess.CompletedProcess:
         self.log(f"Executing in container '{container_name}': {' '.join(command)}", logging.DEBUG)
         """Execute a command in a Docker container as root"""
-        cmd = ['docker', 'exec', '-u', '0', container_name] + command
-        if self.dry_run:
-            print(f"    🔍 DRY RUN: Would execute: {' '.join(cmd)}")
-            # For dry run, still need to get actual data for analysis
-            return subprocess.run(cmd, capture_output=True, text=True)
+        if docker_opts is None:
+            docker_opts = []
+        
+        cmd = ['docker', 'exec', '-u', '0'] + docker_opts + [container_name] + command
+        
+        # The original implementation of dry run for this function was problematic
+        # because it still executed the command. We will adjust it to only print.
+        if self.dry_run and command[0] != 'wp':
+             print(f"    🔍 DRY RUN: Would execute: {' '.join(cmd)}")
+             # For non-wp commands in dry-run, return a dummy success object
+             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        # For wp-cli commands, we often need the output even in dry run for analysis.
+        if self.dry_run and command[0] == 'wp':
+            print(f"    🔍 DRY RUN (info gathering): Would execute: {' '.join(cmd)}")
+
         return subprocess.run(cmd, capture_output=True, text=True)
     
     def get_wp_updates(self, container_name: str) -> Dict:
@@ -345,6 +356,25 @@ class WordPressUpdater:
         
         return success
     
+    def update_db_schema(self, container_name: str) -> bool:
+        """Run `wp core update-db` to apply any pending database schema updates."""
+        if self.dry_run:
+            print(f"    🔍 DRY RUN: Would check for and apply database schema updates...")
+            print(f"    🔍 DRY RUN: Would execute: docker exec -u 0 {container_name} wp --allow-root core update-db")
+            print(f"    🔍 DRY RUN: Database schema check/update would be performed.")
+            return True
+
+        print(f"    🔄 Checking for and applying database schema updates...")
+        result = self.docker_exec(container_name, ['wp', '--allow-root', 'core', 'update-db'])
+        if result.returncode == 0:
+            print(f"    ✅ Database schema check/update completed.")
+            if result.stdout and "already updated" not in result.stdout:
+                print(f"       Output: {result.stdout.strip()}")
+            return True
+        else:
+            print(f"    ❌ Database schema update failed: {result.stderr}")
+            return False
+
     def update_rank_math_elementor_plugins(self, container_name: str, plugins: list) -> bool:
         """
         Update Rank Math and Elementor plugins in the required order if present.
@@ -374,7 +404,8 @@ class WordPressUpdater:
 
     def print_dry_run_summary(self, selected_container: str, updates: Dict, 
                             update_core: bool = None, update_plugins: str = None, 
-                            update_themes: str = None, backup: bool = True):
+                            update_themes: str = None, backup: bool = True,
+                            check_db_schema: bool = False):
         """Print a comprehensive summary of what would happen in dry run mode"""
         if not self.dry_run:
             return
@@ -447,6 +478,13 @@ class WordPressUpdater:
             else:
                 print(f"\n❌ THEMES: No updates available")
         
+        # DB Schema update actions
+        if check_db_schema:
+            action_count += 1
+            print(f"\n{action_count}. DATABASE SCHEMA UPDATE:")
+            print(f"   🎯 Target: WordPress Database Schema")
+            print(f"   💻 Command: docker exec -u 0 {container_name} wp --allow-root core update-db")
+
         if action_count == 0:
             print(f"\n✅ No actions would be performed - everything is up to date")
         
@@ -467,7 +505,7 @@ class WordPressUpdater:
             print(f"\n[interrupted, using default: {default}]")
             return default
     
-    def run_interactive(self, skip_rank_math_elementor_update=False, restart_docker=False):
+    def run_interactive(self, skip_rank_math_elementor_update=False, restart_docker=False, mirror_assets=False, check_db_schema=False):
         """Run the updater in interactive mode"""
         if self.dry_run:
             print("🔍 DRY RUN MODE: No changes will be made - showing what would happen")
@@ -627,17 +665,25 @@ class WordPressUpdater:
                     print(f"\n🔄 Updating selected themes...")
                     self.update_themes(selected_container, updates['themes'], selected_themes)
         
+        # Handle DB schema update
+        if check_db_schema:
+            print(f"\n🔄 Checking/updating database schema...")
+            self.update_db_schema(selected_container)
+
         if self.dry_run:
             self.print_dry_run_summary(selected_container, updates, will_update_core, 
-                                     will_update_plugins, will_update_themes, will_backup)
+                                     will_update_plugins, will_update_themes, will_backup,
+                                     check_db_schema=check_db_schema)
         else:
             print(f"\n✅ Update process completed for '{selected_container}'")
+            if mirror_assets:
+                self.mirror_wp_assets(selected_container)
             if restart_docker:
                 self.restart_docker_compose(self.working_dir)
-            self.mirror_wp_assets(selected_container)
 
     def run_non_interactive(self, update_core: bool, update_plugins: str, update_themes: str, 
-                          backup: bool = True, skip_rank_math_elementor_update=False, restart_docker=False, mirror_assets=False):
+                          backup: bool = True, skip_rank_math_elementor_update=False, restart_docker=False, mirror_assets=False,
+                          check_db_schema: bool = False):
         """Run the updater in non-interactive mode"""
         if self.dry_run:
             print("🔍 DRY RUN MODE: No changes will be made - showing what would happen")
@@ -704,15 +750,21 @@ class WordPressUpdater:
         elif update_themes and not updates['themes']:
             print(f"✅ All themes are already up to date")
         
+        # Update DB schema
+        if check_db_schema:
+            print(f"🔄 Checking/updating database schema...")
+            self.update_db_schema(selected_container)
+
         if self.dry_run:
             self.print_dry_run_summary(selected_container, updates, update_core, 
-                                     update_plugins, update_themes, backup)
+                                     update_plugins, update_themes, backup,
+                                     check_db_schema=check_db_schema)
         else:
             print(f"✅ Non-interactive update process completed for '{selected_container}'")
-            if restart_docker:
-                self.restart_docker_compose(self.working_dir)
             if mirror_assets:
                 self.mirror_wp_assets(selected_container)
+            if restart_docker:
+                self.restart_docker_compose(self.working_dir)
 
     def restart_docker_compose(self, working_dir: str):
         """Restart docker-compose stack."""
@@ -738,7 +790,9 @@ class WordPressUpdater:
         """Helper to get a JSON list of plugins or themes from the container."""
         self.log(f"    Generating internal inventory for {asset_type}s...", logging.DEBUG)
         cmd = ['wp', '--allow-root', asset_type, 'list', '--format=json']
-        result = self.docker_exec(container_name, cmd)
+        # Run wp-cli commands from the standard WP directory
+        docker_options = ['--workdir', '/var/www/html']
+        result = self.docker_exec(container_name, cmd, docker_opts=docker_options)
         if result.returncode == 0 and result.stdout:
             try:
                 return json.loads(result.stdout)
@@ -752,105 +806,39 @@ class WordPressUpdater:
 
     def mirror_wp_assets(self, container_name: str):
         """
-        Mirrors plugins and themes from a Docker container to the host,
-        and verifies consistency by comparing inventories before and after.
+        Mirrors plugins and themes from a Docker container to the host by calling an external script.
         """
         print("\n" + "-"*50)
         print(f"🔗 Mirroring WP assets for container: '{container_name}'")
 
-        if not self.working_dir:
-            self.working_dir = self.get_working_directory(container_name)
-        
-        if not self.working_dir:
-            self.log(f"Could not determine working directory for '{container_name}'. Skipping asset mirroring.", logging.ERROR)
+        script_path = "/var/opt/scripts/mirror-wp-assets.sh"
+
+        if not os.path.exists(script_path):
+            self.log(f"Asset mirroring script not found at '{script_path}'. Skipping step.", logging.WARNING)
             return
 
-        self.log(f"Found working directory: {self.working_dir}", logging.INFO)
-
-        host_content_dir = os.path.join(self.working_dir, 'www', 'wp-content')
-        host_plugins_dir = os.path.join(host_content_dir, 'plugins')
-        host_themes_dir = os.path.join(host_content_dir, 'themes')
-        container_plugins_dir = "/var/www/html/wp-content/plugins"
-        container_themes_dir = "/var/www/html/wp-content/themes"
-
-        # --- Step 1: Generate "before" inventory ---
-        print("  🔍 Generating pre-mirror inventory from container...")
-        plugins_before = self._generate_inventory(container_name, 'plugin')
-        themes_before = self._generate_inventory(container_name, 'theme')
-        if plugins_before is None or themes_before is None:
-            print("  ❌ Could not generate initial inventory. Aborting mirror.")
-            return
-
-        # --- Step 2: Create a tarball of existing host directories ---
-        if os.path.isdir(host_plugins_dir) or os.path.isdir(host_themes_dir):
-            tarball_path = os.path.join(self.working_dir, f"wp_content_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}_temp.tgz")
-            if self.dry_run:
-                print(f"  🔍 DRY RUN: Would create backup tarball of existing host directories at: {tarball_path}")
-            else:
-                print("  💾 Creating backup tarball of existing host directories...")
-                try:
-                    with tarfile.open(tarball_path, "w:gz") as tar:
-                        if os.path.isdir(host_plugins_dir):
-                            tar.add(host_plugins_dir, arcname='plugins')
-                        if os.path.isdir(host_themes_dir):
-                            tar.add(host_themes_dir, arcname='themes')
-                    print(f"  ✅ Backup created at: {tarball_path}")
-                except Exception as e:
-                    self.log(f"Failed to create backup tarball: {e}", logging.ERROR)
-        else:
-            self.log("Host plugin/theme directories not found. Skipping backup.", logging.WARN)
-
-        # --- Step 3: Copy directories from Docker container to host ---
         if self.dry_run:
-            print(f"  🔍 DRY RUN: Would remove existing host directory: '{host_plugins_dir}'")
-            print(f"  🔍 DRY RUN: Would remove existing host directory: '{host_themes_dir}'")
-            print(f"  🔍 DRY RUN: Would copy 'plugins' from '{container_name}:{container_plugins_dir}' to '{host_content_dir}'")
-            print(f"  🔍 DRY RUN: Would copy 'themes' from '{container_name}:{container_themes_dir}' to '{host_content_dir}'")
-            print(f"  ✅ Dry run for asset mirroring complete for '{container_name}'.")
+            print(f"  🔍 DRY RUN: Would execute asset mirroring script for '{container_name}'.")
+            print(f"  🔍 DRY RUN: Would run command: {script_path} --include {container_name}")
             return
 
-        print("  🔄 Copying directories from container to host...")
         try:
-            if os.path.isdir(host_plugins_dir):
-                shutil.rmtree(host_plugins_dir)
-            if os.path.isdir(host_themes_dir):
-                shutil.rmtree(host_themes_dir)
-
-            print("    📥 Copying 'plugins' from container...")
-            subprocess.run(['docker', 'cp', f"{container_name}:{container_plugins_dir}", host_content_dir], check=True, capture_output=True)
-            
-            print("    📥 Copying 'themes' from container...")
-            subprocess.run(['docker', 'cp', f"{container_name}:{container_themes_dir}", host_content_dir], check=True, capture_output=True)
-            
-            print("  ✅ Finished copying files from container.")
-        except (subprocess.CalledProcessError, Exception) as e:
-            stderr = e.stderr.decode() if hasattr(e, 'stderr') else str(e)
-            self.log(f"Error during asset mirroring: {stderr}", logging.ERROR)
-            return
-
-        # --- Step 4: Generate "after" inventory and compare ---
-        print("  🔍 Generating post-mirror inventory for verification...")
-        plugins_after = self._generate_inventory(container_name, 'plugin')
-        themes_after = self._generate_inventory(container_name, 'theme')
-
-        final_status = True
-        if plugins_before != plugins_after:
-            print("  ❌ Plugin inventories differ after copy operation. This is unexpected.")
-            final_status = False
-        else:
-            print("  ✅ Plugin inventories are identical. Verification successful.")
-
-        if themes_before != themes_after:
-            print("  ❌ Theme inventories differ after copy operation. This is unexpected.")
-            final_status = False
-        else:
-            print("  ✅ Theme inventories are identical. Verification successful.")
-
-        if final_status:
-            print(f"\n🔗 Asset mirroring and verification complete for '{container_name}'.")
-        else:
-            print(f"\n⚠️ Asset mirroring for '{container_name}' completed, but with verification errors.")
-        print("-" * 50)
+            cmd = [script_path, '--include', container_name]
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            self.log(f"Successfully mirrored assets for '{container_name}'.", logging.INFO)
+            if result.stdout:
+                self.log(f"Script output:\n{result.stdout}", logging.DEBUG)
+        except FileNotFoundError:
+            self.log(f"Error: The script '{script_path}' was not found.", logging.ERROR)
+        except subprocess.CalledProcessError as e:
+            self.log(f"Error during asset mirroring for '{container_name}':", logging.ERROR)
+            self.log(f"  Return Code: {e.returncode}", logging.ERROR)
+            self.log(f"  Output:\n{e.stdout}", logging.ERROR)
+            self.log(f"  Error Output:\n{e.stderr}", logging.ERROR)
+        except Exception as e:
+            self.log(f"An unexpected error occurred: {e}", logging.ERROR)
+        finally:
+            print("-" * 50)
 
 
 def parse_container_names_arg(arg) -> list:
@@ -898,6 +886,8 @@ def main():
                         help='Skip all backup creation steps')
     parser.add_argument('--skip-rank-math-elementor-update', action='store_true',
                         help='Skip updates for Rank Math and Elementor plugins')
+    parser.add_argument('--check-update-db-schema', action='store_true',
+                       help='Run `wp core update-db` to check for and apply database schema updates.')
 
     args = parser.parse_args()
     
@@ -906,7 +896,7 @@ def main():
         if not args.container_name:
             print(f"❌ --container-name is required for non-interactive mode")
             sys.exit(1)
-        if not any([args.update_core, args.update_plugins, args.update_themes]):
+        if not any([args.update_core, args.update_plugins, args.update_themes, args.check_update_db_schema]):
             print("❌ At least one update option must be specified for non-interactive mode")
             sys.exit(1)
 
@@ -915,8 +905,8 @@ def main():
         print("🔍 Detected non-interactive environment with --dry-run")
         if not args.container_name and not args.all_containers:
             print("💡 Tip: Use --container-name or --all-containers for non-interactive dry runs")
-        if not any([args.update_core, args.update_plugins, args.update_themes]):
-            print("💡 Tip: Use --update-core, --update-plugins, and/or --update-themes to specify what to update")
+        if not any([args.update_core, args.update_plugins, args.update_themes, args.check_update_db_schema]):
+            print("💡 Tip: Use --update-core, --update-plugins, --update-themes, and/or --check-update-db-schema to specify what to update")
 
     # Handle --all-containers
     if args.all_containers:
@@ -935,10 +925,18 @@ def main():
                     update_plugins=args.update_plugins,
                     update_themes=args.update_themes,
                     backup=not (args.no_backup or args.skip_backups),
-                    skip_rank_math_elementor_update=args.skip_rank_math_elementor_update
+                    skip_rank_math_elementor_update=args.skip_rank_math_elementor_update,
+                    restart_docker=args.restart_docker,
+                    mirror_assets=args.mirror_wp_assets,
+                    check_db_schema=args.check_update_db_schema
                 )
             else:
-                updater.run_interactive(skip_rank_math_elementor_update=args.skip_rank_math_elementor_update)
+                updater.run_interactive(
+                    skip_rank_math_elementor_update=args.skip_rank_math_elementor_update,
+                    restart_docker=args.restart_docker,
+                    mirror_assets=args.mirror_wp_assets,
+                    check_db_schema=args.check_update_db_schema
+                )
         print("\n✅ All containers processed.")
         sys.exit(0)
 
@@ -959,10 +957,18 @@ def main():
                     update_plugins=args.update_plugins,
                     update_themes=args.update_themes,
                     backup=not (args.no_backup or args.skip_backups),
-                    skip_rank_math_elementor_update=args.skip_rank_math_elementor_update
+                    skip_rank_math_elementor_update=args.skip_rank_math_elementor_update,
+                    restart_docker=args.restart_docker,
+                    mirror_assets=args.mirror_wp_assets,
+                    check_db_schema=args.check_update_db_schema
                 )
             else:
-                updater.run_interactive(skip_rank_math_elementor_update=args.skip_rank_math_elementor_update)
+                updater.run_interactive(
+                    skip_rank_math_elementor_update=args.skip_rank_math_elementor_update,
+                    restart_docker=args.restart_docker,
+                    mirror_assets=args.mirror_wp_assets,
+                    check_db_schema=args.check_update_db_schema
+                )
         print("\n✅ All specified containers processed.")
         sys.exit(0)
 
@@ -974,10 +980,18 @@ def main():
             update_plugins=args.update_plugins,
             update_themes=args.update_themes,
             backup=not (args.no_backup or args.skip_backups),
-            skip_rank_math_elementor_update=args.skip_rank_math_elementor_update
+            skip_rank_math_elementor_update=args.skip_rank_math_elementor_update,
+            restart_docker=args.restart_docker,
+            mirror_assets=args.mirror_wp_assets,
+            check_db_schema=args.check_update_db_schema
         )
     else:
-        updater.run_interactive(skip_rank_math_elementor_update=args.skip_rank_math_elementor_update)
+        updater.run_interactive(
+            skip_rank_math_elementor_update=args.skip_rank_math_elementor_update,
+            restart_docker=args.restart_docker,
+            mirror_assets=args.mirror_wp_assets,
+            check_db_schema=args.check_update_db_schema
+        )
 
 if __name__ == "__main__":
     main()
