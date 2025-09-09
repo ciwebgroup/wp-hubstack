@@ -15,7 +15,7 @@ import glob
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler()]
 )
 
@@ -385,7 +385,6 @@ class WordPressUpdater:
         print(f"Container: {selected_container}")
         print(f"Working Directory: {self.working_dir}")
         print(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"\nActions that would be performed:")
         
         action_count = 0
         
@@ -468,11 +467,10 @@ class WordPressUpdater:
             print(f"\n[interrupted, using default: {default}]")
             return default
     
-    def run_interactive(self, skip_rank_math_elementor_update=False):
+    def run_interactive(self, skip_rank_math_elementor_update=False, restart_docker=False):
         """Run the updater in interactive mode"""
         if self.dry_run:
             print("🔍 DRY RUN MODE: No changes will be made - showing what would happen")
-            print("-" * 70)
         
         # Get all WordPress containers
         self.wp_containers = self.get_wp_containers()
@@ -482,6 +480,7 @@ class WordPressUpdater:
             sys.exit(1)
         
         # Select container
+        selected_container = None
         if self.container_name:
             if self.container_name not in self.wp_containers:
                 print(f"❌ Container '{self.container_name}' not found.")
@@ -497,13 +496,14 @@ class WordPressUpdater:
                 print("Use --container-name <name> to specify a container")
                 sys.exit(1)
             
-            print("📦 Found WordPress containers:")
+            print(f"📦 Found WordPress containers:")
             for i, container in enumerate(self.wp_containers, 1):
                 print(f"  {i}. {container}")
             
             while True:
                 try:
-                    choice = self.safe_input("\nSelect container number: ", "1")
+                    prompt_text = "\nSelect container number: "
+                    choice = self.safe_input(prompt_text, "1")
                     if not choice:  # Handle empty input in non-interactive mode
                         choice = "1"
                     idx = int(choice) - 1
@@ -511,12 +511,8 @@ class WordPressUpdater:
                         selected_container = self.wp_containers[idx]
                         break
                     else:
-                        print("Invalid selection. Please try again.")
-                        if not self.is_interactive:
-                            print("Using first container as default")
-                            selected_container = self.wp_containers[0]
-                            break
-                except ValueError:
+                        print("Please enter a valid number.")
+                except (ValueError, IndexError):
                     print("Please enter a valid number.")
                     if not self.is_interactive:
                         print("Using first container as default")
@@ -636,13 +632,15 @@ class WordPressUpdater:
                                      will_update_plugins, will_update_themes, will_backup)
         else:
             print(f"\n✅ Update process completed for '{selected_container}'")
-    
+            if restart_docker:
+                self.restart_docker_compose(self.working_dir)
+            self.mirror_wp_assets(selected_container)
+
     def run_non_interactive(self, update_core: bool, update_plugins: str, update_themes: str, 
-                          backup: bool = True, skip_rank_math_elementor_update=False):
+                          backup: bool = True, skip_rank_math_elementor_update=False, restart_docker=False, mirror_assets=False):
         """Run the updater in non-interactive mode"""
         if self.dry_run:
             print("🔍 DRY RUN MODE: No changes will be made - showing what would happen")
-            print("-" * 70)
         
         # Get container
         if self.container_name:
@@ -651,7 +649,7 @@ class WordPressUpdater:
                 sys.exit(1)
             selected_container = self.container_name
         else:
-            print("❌ Container name is required for non-interactive mode.")
+            print(f"❌ Container name is required for non-interactive mode.")
             sys.exit(1)
         
         mode_text = "(non-interactive dry run mode)" if self.dry_run else "(non-interactive mode)"
@@ -711,6 +709,86 @@ class WordPressUpdater:
                                      update_plugins, update_themes, backup)
         else:
             print(f"✅ Non-interactive update process completed for '{selected_container}'")
+            if restart_docker:
+                self.restart_docker_compose(self.working_dir)
+            if mirror_assets:
+                self.mirror_wp_assets(selected_container)
+
+    def restart_docker_compose(self, working_dir: str):
+        """Restart docker-compose stack."""
+        print(f"🔄 Restarting docker-compose stack in '{working_dir}'...")
+        try:
+            # Change to the working directory
+            os.chdir(working_dir)
+            # Restart the stack
+            result = subprocess.run(['docker-compose', 'down'], capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"  ❌ Error stopping containers: {result.stderr}")
+            result = subprocess.run(['docker-compose', 'up', '-d'], capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"  ❌ Error starting containers: {result.stderr}")
+            print(f"  ✅ Docker-compose stack restarted successfully")
+        except Exception as e:
+            print(f"  ❌ Error restarting docker-compose: {e}")
+        finally:
+            # Change back to the original directory
+            os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+    def mirror_wp_assets(self, container_name: str):
+        """
+        Mirrors plugins and themes from a Docker container to the host.
+        This is a Python implementation of the mirror-wp-assets.sh script.
+        """
+        print("\n" + "-"*50)
+        print(f"🔗 Mirroring WP assets for container: '{container_name}'")
+
+        if not self.working_dir:
+            self.working_dir = self.get_working_directory(container_name)
+        
+        if not self.working_dir:
+            self.log(f"Could not determine working directory for '{container_name}'. Skipping asset mirroring.", logging.ERROR)
+            return
+
+        self.log(f"Found working directory: {self.working_dir}", logging.INFO)
+
+        host_content_dir = os.path.join(self.working_dir, 'www', 'wp-content')
+        container_content_dir = '/var/www/html/wp-content'
+
+        # Define the subdirectories to mirror
+        subdirs = [
+            'plugins',
+            'themes',
+            'uploads'
+        ]
+
+        # Mirror each subdirectory
+        for subdir in subdirs:
+            host_dir = os.path.join(host_content_dir, subdir)
+            container_dir = os.path.join(container_content_dir, subdir)
+
+            # Create the host directory if it doesn't exist
+            os.makedirs(host_dir, exist_ok=True)
+
+            # Rsync options:
+            # -a: archive mode (preserves permissions, timestamps, etc.)
+            # -u: skip files that are newer on the receiver
+            # --delete: delete files in the destination that are not present in the source
+            rsync_cmd = [
+                'docker', 'run', '--rm',
+                '-v', f"{host_dir}:/mnt/host_dir",
+                '-v', f"{container_name}:{container_dir}",
+                'alpine', 'sh', '-c',
+                f"apk add --no-cache rsync && rsync -au --delete /mnt/host_dir/ /{subdir}/"
+            ]
+
+            print(f"  📦 Mirroring {subdir}...")
+            result = subprocess.run(rsync_cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                print(f"    ✅ {subdir} mirrored successfully")
+            else:
+                print(f"    ❌ Error mirroring {subdir}: {result.stderr}")
+
+        print(f"🔗 WP assets mirroring completed for container: '{container_name}'")
 
 def parse_container_names_arg(arg) -> list:
     """Parse --container-names argument from file, pipebar, or stdin, supporting both | and \\n delimiters."""
@@ -746,20 +824,24 @@ def main():
                        help='Skip backup creation (non-interactive mode)')
     parser.add_argument('--dry-run', action='store_true',
                        help='Show what would be done without making any changes')
-    parser.add_argument('--skip-rank-math-elementor-update', action='store_true',
-                        help='Skip special update order for Rank Math and Elementor plugins')
+    parser.add_argument('--restart-docker', action='store_true',
+                       help='Restart the docker-compose stack after updates are complete.')
+    parser.add_argument('--mirror-wp-assets', action='store_true',
+                       help='Mirror plugins and themes from container to host after updates.')
     parser.add_argument('--verbose', '-v', action='store_true', help='Increase output verbosity')
     parser.add_argument('--delete-tarballs-in-container', action='store_true',
                        help='Delete any existing tarballs in the container directory before backup')
     parser.add_argument('--skip-backups', action='store_true',
                         help='Skip all backup creation steps')
-    
+    parser.add_argument('--skip-rank-math-elementor-update', action='store_true',
+                        help='Skip updates for Rank Math and Elementor plugins')
+
     args = parser.parse_args()
     
     # Validate non-interactive mode requirements
     if args.non_interactive and not args.dry_run and not args.all_containers:
         if not args.container_name:
-            print("❌ --container-name is required for non-interactive mode")
+            print(f"❌ --container-name is required for non-interactive mode")
             sys.exit(1)
         if not any([args.update_core, args.update_plugins, args.update_themes]):
             print("❌ At least one update option must be specified for non-interactive mode")
