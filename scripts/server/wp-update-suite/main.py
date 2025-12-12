@@ -11,6 +11,21 @@ from typing import List, Dict, Optional
 import logging
 import tarfile
 import shutil
+from pathlib import Path
+from typing import Any
+
+# YAML parser preference: ruamel.yaml (preserve formatting) then PyYAML
+try:
+    from ruamel.yaml import YAML as RuamelYAML
+    _yaml_type = 'ruamel'
+except Exception:
+    RuamelYAML = None
+    try:
+        import yaml as pyyaml
+        _yaml_type = 'pyyaml'
+    except Exception:
+        pyyaml = None
+        _yaml_type = None
 
 
 logging.basicConfig(
@@ -251,13 +266,166 @@ class WordPressUpdater:
             print(f"    🔍 DRY RUN: WordPress core would be updated successfully")
             return True
             
-        print(f"    🔄 Updating WordPress core...")
+        # Prefer to perform a core update by updating the image referenced in docker-compose.yml
+        # and performing a docker compose pull/down/up if a compose file exists in the working dir
+        compose_result = self.update_core_via_compose(self.working_dir, container_name)
+        if compose_result is not None:
+            return compose_result
+
+        # Fallback to WP CLI core update when no compose-based update was performed
+        print(f"    🔄 Updating WordPress core (wp-cli)...")
         result = self.docker_exec(container_name, ['wp', '--allow-root', 'core', 'update'])
         if result.returncode == 0:
             print(f"    ✅ WordPress core updated successfully")
             return True
         else:
             print(f"    ❌ WordPress core update failed: {result.stderr}")
+            return False
+
+    def locate_compose_file(self, working_dir: str) -> Optional[str]:
+        """Locate docker-compose file(s) in the provided working directory."""
+        if not working_dir:
+            return None
+        candidates = [
+            'docker-compose.yml', 'docker-compose.yaml',
+            'compose.yml', 'compose.yaml'
+        ]
+        for c in candidates:
+            p = Path(working_dir) / c
+            if p.exists():
+                return str(p)
+        return None
+
+    def update_compose_image_if_needed(self, compose_path: str, service_name: Optional[str] = None) -> bool:
+        """Update the service image to ghcr.io/ciwebgroup/advanced-wordpress:latest if necessary.
+        Returns True if a change was made, False otherwise.
+        """
+        desired_image = 'ghcr.io/ciwebgroup/advanced-wordpress:latest'
+        try:
+            if _yaml_type == 'ruamel' and RuamelYAML:
+                yaml = RuamelYAML()
+                data = yaml.load(Path(compose_path))
+                services = data.get('services') or {}
+                # Determine candidate service
+                svc = None
+                if service_name and service_name in services:
+                    svc = service_name
+                else:
+                    for s in services:
+                        if s.startswith('wp_'):
+                            svc = s
+                            break
+                if not svc:
+                    return False
+                image_val = services[svc].get('image')
+                if image_val != desired_image:
+                    services[svc]['image'] = desired_image
+                    yaml.dump(data, Path(compose_path))
+                    return True
+                return False
+            elif _yaml_type == 'pyyaml' and pyyaml:
+                with open(compose_path, 'r') as f:
+                    data = pyyaml.safe_load(f)
+                services = data.get('services') or {}
+                svc = None
+                if service_name and service_name in services:
+                    svc = service_name
+                else:
+                    for s in services:
+                        if s.startswith('wp_'):
+                            svc = s
+                            break
+                if not svc:
+                    return False
+                image_val = services[svc].get('image')
+                if image_val != desired_image:
+                    services[svc]['image'] = desired_image
+                    with open(compose_path, 'w') as f:
+                        pyyaml.safe_dump(data, f, default_flow_style=False)
+                    return True
+                return False
+            else:
+                print('    ⚠️  No YAML parser available (ruamel.yaml or PyYAML). Skipping compose image check.')
+                return False
+        except Exception as e:
+            print(f"    ⚠️  Error reading/updating compose file '{compose_path}': {e}")
+            return False
+
+    def _run_compose_commands(self, working_dir: str) -> bool:
+        """Executes: docker compose pull && docker compose down && docker compose up -d
+        Returns True on success, False otherwise.
+        Tries 'docker compose' first and falls back to 'docker-compose'."""
+        if not working_dir:
+            return False
+        commands = [
+            (['docker', 'compose', 'pull'], 'docker compose pull'),
+            (['docker', 'compose', 'down'], 'docker compose down'),
+            (['docker', 'compose', 'up', '-d'], 'docker compose up -d')
+        ]
+        # Try docker compose commands (compose v2), fall back to docker-compose if any command fails
+        for cmd, _desc in commands:
+            result = subprocess.run(cmd, cwd=working_dir, capture_output=True, text=True)
+            if result.returncode != 0:
+                # Try docker-compose variant for this command
+                alt_cmd = cmd[:]
+                alt_cmd[0] = 'docker-compose'
+                result_alt = subprocess.run(alt_cmd, cwd=working_dir, capture_output=True, text=True)
+                if result_alt.returncode != 0:
+                    print(f"  ❌ Command failed in {working_dir}: {cmd if result.returncode != 0 else alt_cmd}")
+                    print(f"    stderr: {result.stderr if result.returncode != 0 else result_alt.stderr}")
+                    return False
+        return True
+
+    def update_core_via_compose(self, working_dir: str, container_name: str) -> Optional[bool]:
+        """If a compose file exists for the working_dir and references the container/service, update image if needed and run compose commands.
+        Returns True if compose-based update was performed successfully, False if attempted and failed, or None if not attempted (no compose file/service found).
+        """
+        compose_path = self.locate_compose_file(working_dir)
+        if not compose_path:
+            return None
+
+        # Attempt to use service name matching the container name first
+        service_name = None
+        try:
+            # If a service exactly matches the container name, use it
+            if _yaml_type == 'ruamel' and RuamelYAML:
+                yaml = RuamelYAML()
+                data = yaml.load(Path(compose_path))
+            elif _yaml_type == 'pyyaml' and pyyaml:
+                with open(compose_path, 'r') as f:
+                    data = pyyaml.safe_load(f)
+            else:
+                data = {}
+        except Exception:
+            data = {}
+        services = (data or {}).get('services') or {}
+        if container_name in services:
+            service_name = container_name
+        else:
+            # Otherwise take the first wp_ service that matches the container pattern
+            for s in services:
+                if s.startswith('wp_'):
+                    service_name = s
+                    break
+
+        if not service_name:
+            # No wp_* service found in compose file
+            return None
+
+        # Update image in compose file if needed
+        changed = self.update_compose_image_if_needed(compose_path, service_name=service_name)
+        if changed:
+            print(f"    ✅ Updated service '{service_name}' image in compose file to ghcr.io/ciwebgroup/advanced-wordpress:latest")
+        else:
+            print(f"    ℹ️ Compose image already up-to-date for service '{service_name}'")
+
+        print(f"    🔄 Running docker compose pull/down/up in '{working_dir}' to apply image changes")
+        success = self._run_compose_commands(working_dir)
+        if success:
+            print(f"    ✅ Compose-based core update performed successfully for '{service_name}'")
+            return True
+        else:
+            print(f"    ❌ Compose-based core update failed for '{service_name}'")
             return False
     
     def update_plugins(self, container_name: str, plugins: List, selected_indices: List) -> bool:
@@ -305,6 +473,14 @@ class WordPressUpdater:
             else:
                 print(f"    ❌ Plugin '{plugin_name}' update failed: {result.stderr}")
                 success = False
+        
+        # Flush cache after all plugin updates
+        print(f"    🔄 Flushing cache...")
+        result = self.docker_exec(container_name, ['wp', '--allow-root', 'cache', 'flush'])
+        if result.returncode == 0:
+            print(f"    ✅ Cache flushed successfully")
+        else:
+            print(f"    ❌ Cache flush failed: {result.stderr}")
         
         return success
     
@@ -388,6 +564,7 @@ class WordPressUpdater:
         ]
         found_plugins = [p for p in plugin_order if any(pl['name'] == p for pl in plugins)]
         if not found_plugins:
+            print(f"    ℹ️ No Rank Math or Elementor plugins found; skipping related updates.")
             return True  # Nothing to do
 
         print(f"\n🔄 Updating Rank Math and Elementor plugins in required order:")
@@ -400,6 +577,19 @@ class WordPressUpdater:
             else:
                 print(f"    ❌ Plugin '{plugin_slug}' update failed: {result.stderr}")
                 success = False
+        
+        # Update Elementor database if Elementor plugins were updated
+        if any('elementor' in p for p in found_plugins):
+            print(f"    🔄 Updating Elementor database...")
+            result = self.docker_exec(container_name, ['wp', '--allow-root', 'elementor', 'update', 'db'])
+            if result.returncode == 0:
+                print(f"    ✅ Elementor database updated successfully")
+            else:
+                print(f"    ❌ Elementor database update failed: {result.stderr}")
+                success = False
+        else:
+            print(f"    ℹ️ No Elementor plugin updates detected; skipping Elementor database update.")
+        
         return success
 
     def print_dry_run_summary(self, selected_container: str, updates: Dict, 

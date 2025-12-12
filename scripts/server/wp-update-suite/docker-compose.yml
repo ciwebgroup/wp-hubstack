@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  wp-updater:
+    build: .
+    image: ciweb/wp-update-suite:latest
+    container_name: wp-updater
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./:/app:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /usr/bin/docker:/usr/bin/docker:ro
+    working_dir: /app
+    command: ["python3", "main.py"]
+    # If you want to log to a file on host, uncomment and set the path
+    # volumes:
+    #   - /root/logs:/root/logs
