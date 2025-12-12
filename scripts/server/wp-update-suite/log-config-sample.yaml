@@ -1,8 +1,12 @@
 # WordPress Update Suite Log Rotation Configuration
 # This file allows you to customize log rotation settings
 
-# Log file path (default: /var/log/wp-update-suite.log)
-log_file: /var/log/wp-update-suite.log
+# Preferred: directory + base filename
+log_dir: /var/log
+base_filename: wp-update-suite.log
+
+# Backward compatible (optional): explicit full path overrides log_dir/base_filename
+# log_file: /var/log/wp-update-suite.log
 
 # Maximum file size before rotation in bytes (default: 10485760 = 10MB)
 # You can use expressions like: 10 * 1024 * 1024 for 10MB
@@ -13,10 +17,6 @@ backup_count: 5
 
 # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: INFO)
 log_level: INFO
-
-# Optional: Backup naming style
-# Set to 'timestamped' to use timestamped backup names instead of numbered ones
-# backup_style: numbered  # Options: 'numbered' (default) or 'timestamped'
 
 # Log message format (default: '%(asctime)s - %(levelname)s - %(message)s')
 # Available format variables:
