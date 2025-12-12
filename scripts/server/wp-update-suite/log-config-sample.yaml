@@ -8,6 +8,13 @@ base_filename: wp-update-suite.log
 # Backward compatible (optional): explicit full path overrides log_dir/base_filename
 # log_file: /var/log/wp-update-suite.log
 
+# Optional: create a unique active log file per run (timestamp+pid)
+# per_run: true
+
+# Optional: redirect all stdout/stderr (including print output) into the log file for this run.
+# Useful for cron/non-interactive runs.
+# redirect_stdio: true
+
 # Maximum file size before rotation in bytes (default: 10485760 = 10MB)
 # You can use expressions like: 10 * 1024 * 1024 for 10MB
 max_bytes: 10485760
