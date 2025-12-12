@@ -682,7 +682,7 @@ class WordPressUpdater:
             action_count += 1
             print(f"\n{action_count}. DATABASE SCHEMA UPDATE:")
             print(f"   🎯 Target: WordPress Database Schema")
-            print(f"   💻 Command: docker exec -u 0 {container_name} wp --allow-root core update-db")
+            print(f"   💻 Command: docker exec -u 0 {selected_container} wp --allow-root core update-db")
 
         if action_count == 0:
             print(f"\n✅ No actions would be performed - everything is up to date")
