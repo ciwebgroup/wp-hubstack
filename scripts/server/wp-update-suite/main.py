@@ -43,6 +43,12 @@ def get_default_log_config() -> Dict[str, Any]:
         'base_filename': 'wp-update-suite.log',
         # Backward compatible: if log_file is provided in YAML, it will be honored
         'log_file': None,
+        # When true, cChecking for and applying database schema updates...reate a unique active log file per script execution.
+        # Example: wp-update-suite.20251212_095033_12345.log
+        'per_run': False,
+        # When true, redirect ALL stdout/stderr (including print output) into the log file
+        # for the duration of the run, and remove console logging handlers.
+        'redirect_stdio': False,
         'max_bytes': 10 * 1024 * 1024,  # 10MB
         'backup_count': 5,
         'log_level': 'INFO',
@@ -71,6 +77,12 @@ def print_default_log_config_yaml() -> None:
                 "",
                 "# Backward compatible (optional): explicit full path (overrides log_dir/base_filename)",
                 "# log_file: /var/log/wp-update-suite.log",
+                "",
+                "# Optional: create a unique active log file per run",
+                f"per_run: {str(cfg['per_run']).lower()}",
+                "",
+                "# Optional: redirect stdout/stderr to the log file (useful for cron)",
+                f"redirect_stdio: {str(cfg['redirect_stdio']).lower()}",
                 "",
                 "# Max log file size before rotating (bytes)",
                 f"max_bytes: {cfg['max_bytes']}",
@@ -123,11 +135,24 @@ def setup_log_rotation(*, rotate_logs: bool, config_path: Optional[str]) -> None
     explicit_log_file = log_config.get('log_file')
     log_dir = str(log_config.get('log_dir') or '/var/log')
     base_filename = str(log_config.get('base_filename') or 'wp-update-suite.log')
+    per_run = bool(log_config.get('per_run') or False)
+    redirect_stdio = bool(log_config.get('redirect_stdio') or False)
 
     if explicit_log_file:
-        log_file = str(explicit_log_file)
+        base_log_file = str(explicit_log_file)
     else:
-        log_file = os.path.join(log_dir, base_filename)
+        base_log_file = os.path.join(log_dir, base_filename)
+
+    if per_run:
+        p = Path(base_log_file)
+        run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{os.getpid()}"
+        # Preserve full suffix chain (e.g., .log, .log.txt)
+        suffix = ''.join(p.suffixes)
+        stem = p.name[:-len(suffix)] if suffix else p.name
+        per_run_name = f"{stem}.{run_id}{suffix}" if suffix else f"{stem}.{run_id}"
+        log_file = str(p.with_name(per_run_name))
+    else:
+        log_file = base_log_file
 
     max_bytes = int(log_config.get('max_bytes') or (10 * 1024 * 1024))
     backup_count = int(log_config.get('backup_count') or 5)
@@ -141,6 +166,14 @@ def setup_log_rotation(*, rotate_logs: bool, config_path: Optional[str]) -> None
     actual_log_dir = os.path.dirname(log_file)
     if actual_log_dir:
         os.makedirs(actual_log_dir, exist_ok=True)
+
+    # If requested, ensure nothing is emitted to the terminal.
+    # Note: stdout/stderr redirection happens after handler creation so any setup errors
+    # can still be seen when running interactively.
+    if redirect_stdio:
+        root_logger = logging.getLogger()
+        for h in list(root_logger.handlers):
+            root_logger.removeHandler(h)
 
     handler = logging.handlers.RotatingFileHandler(
         log_file,
@@ -169,7 +202,33 @@ def setup_log_rotation(*, rotate_logs: bool, config_path: Optional[str]) -> None
     handler.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
     logging.getLogger().addHandler(handler)
 
-    logging.info(f"Log rotation enabled: file={log_file} max_bytes={max_bytes} backup_count={backup_count}")
+    if redirect_stdio:
+        class _PathWriter:
+            def __init__(self, path: str):
+                self._path = path
+
+            def write(self, s: str) -> int:
+                if not s:
+                    return 0
+                try:
+                    with open(self._path, 'a', encoding='utf-8', errors='replace') as f:
+                        f.write(s)
+                    return len(s)
+                except Exception:
+                    return 0
+
+            def flush(self) -> None:
+                return
+
+            def isatty(self) -> bool:
+                return False
+
+        sys.stdout = _PathWriter(log_file)
+        sys.stderr = _PathWriter(log_file)
+
+    logging.info(
+        f"Log rotation enabled: file={log_file} max_bytes={max_bytes} backup_count={backup_count} per_run={per_run} redirect_stdio={redirect_stdio}"
+    )
 
 class WordPressUpdater:
     def __init__(self, container_name: Optional[str] = None, dry_run: bool = False, verbose: bool = False):
@@ -244,7 +303,31 @@ class WordPressUpdater:
 
         return subprocess.run(cmd, capture_output=True, text=True)
     
-    def get_wp_updates(self, container_name: str) -> Dict:
+    def _elementor_installed(self, container_name: str) -> bool:
+        """Return True if Elementor plugin appears installed in the container."""
+        result = self.docker_exec(container_name, ['wp', '--allow-root', 'plugin', 'is-installed', 'elementor'])
+        return result.returncode == 0
+
+    def _check_or_update_elementor_db(self, container_name: str) -> str:
+        """Check Elementor DB status by running the update command.
+
+        Returns one of: 'not-installed', 'already-up-to-date', 'updated', 'failed'.
+
+        Note: We intentionally run `wp elementor update db` because Elementor itself reports
+        whether an update is needed. If it is already updated, this is a no-op.
+        """
+        if not self._elementor_installed(container_name):
+            return 'not-installed'
+
+        result = self.docker_exec(container_name, ['wp', '--allow-root', 'elementor', 'update', 'db'])
+        output = ((result.stdout or '') + (result.stderr or '')).strip()
+        if result.returncode == 0:
+            if 'Success: The DB is already updated!' in output:
+                return 'already-up-to-date'
+            return 'updated'
+        return 'failed'
+
+    def get_wp_updates(self, container_name: str, *, check_elementor_db: bool = True) -> Dict:
         """Get available WordPress updates using WP CLI"""
         updates = {
             'core': None,
@@ -285,10 +368,51 @@ class WordPressUpdater:
                             print(f"         🔍 DRY RUN: Would update plugin '{plugin['name']}' from {plugin['version']} to {plugin['update_version']}")
                 else:
                     print(f"    ✅ All plugins are up to date")
+                    # Explicitly confirm Elementor DB status (and update if needed)
+                    if check_elementor_db:
+                        if self.dry_run:
+                            print(f"       🔍 DRY RUN: Would check whether Elementor database updates are needed")
+                        else:
+                            status = self._check_or_update_elementor_db(container_name)
+                            if status == 'already-up-to-date':
+                                print(f"       ✅ Elementor database is already up to date")
+                                logging.info(
+                                    f"Elementor database check: already up to date at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                                )
+                            elif status == 'updated':
+                                print(f"       🔄 Elementor database update applied")
+                                logging.info(
+                                    f"Elementor database update applied at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                                )
+                            elif status == 'failed':
+                                print(f"       ⚠️  Elementor database update check failed")
+                                logging.warning(
+                                    f"Elementor database check/update failed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                                )
             except json.JSONDecodeError:
                 print(f"    ⚠️  Could not parse plugin update information")
         else:
             print(f"    ✅ All plugins are up to date")
+            if check_elementor_db:
+                if self.dry_run:
+                    print(f"       🔍 DRY RUN: Would check whether Elementor database updates are needed")
+                else:
+                    status = self._check_or_update_elementor_db(container_name)
+                    if status == 'already-up-to-date':
+                        print(f"       ✅ Elementor database is already up to date")
+                        logging.info(
+                            f"Elementor database check: already up to date at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                    elif status == 'updated':
+                        print(f"       🔄 Elementor database update applied")
+                        logging.info(
+                            f"Elementor database update applied at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                    elif status == 'failed':
+                        print(f"       ⚠️  Elementor database update check failed")
+                        logging.warning(
+                            f"Elementor database check/update failed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
         
         # Check theme updates
         print(f"  🔍 Checking theme updates...")
@@ -726,8 +850,18 @@ class WordPressUpdater:
         if any('elementor' in p for p in found_plugins):
             print(f"    🔄 Updating Elementor database...")
             result = self.docker_exec(container_name, ['wp', '--allow-root', 'elementor', 'update', 'db'])
+            output = ((result.stdout or '') + (result.stderr or '')).strip()
             if result.returncode == 0:
-                print(f"    ✅ Elementor database updated successfully")
+                if 'Success: The DB is already updated!' in output:
+                    print(f"    ✅ Elementor database is already up to date")
+                    logging.info(
+                        f"Elementor database check: already up to date at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                else:
+                    print(f"    ✅ Elementor database updated successfully")
+                    logging.info(
+                        f"Elementor database update applied at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
             else:
                 print(f"    ❌ Elementor database update failed: {result.stderr}")
                 success = False
@@ -904,7 +1038,7 @@ class WordPressUpdater:
         
         # Check for updates
         print(f"\n🔍 Checking for available updates...")
-        updates = self.get_wp_updates(selected_container)
+        updates = self.get_wp_updates(selected_container, check_elementor_db=not skip_rank_math_elementor_update)
 
         # --- NEW: Update Rank Math and Elementor plugins first ---
         if updates['plugins'] and not skip_rank_math_elementor_update:
@@ -1046,7 +1180,7 @@ class WordPressUpdater:
         
         # Check for updates
         print(f"🔍 Checking for available updates...")
-        updates = self.get_wp_updates(selected_container)
+        updates = self.get_wp_updates(selected_container, check_elementor_db=not skip_rank_math_elementor_update)
 
         # --- NEW: Update Rank Math and Elementor plugins first ---
         if updates['plugins'] and not skip_rank_math_elementor_update:
