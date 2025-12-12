@@ -1,0 +1,43 @@
+# WordPress Update Suite Log Rotation Configuration
+# This file allows you to customize log rotation settings
+
+# Log file path (default: /var/log/wp-update-suite.log)
+log_file: /var/log/wp-update-suite.log
+
+# Maximum file size before rotation in bytes (default: 10485760 = 10MB)
+# You can use expressions like: 10 * 1024 * 1024 for 10MB
+max_bytes: 10485760
+
+# Number of backup files to keep (default: 5)
+backup_count: 5
+
+# Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: INFO)
+log_level: INFO
+
+# Log message format (default: '%(asctime)s - %(levelname)s - %(message)s')
+# Available format variables:
+# - %(asctime)s: Timestamp
+# - %(levelname)s: Log level (INFO, ERROR, etc.)
+# - %(message)s: The actual log message
+# - %(name)s: Logger name
+# - %(filename)s: Source filename
+# - %(lineno)d: Line number
+format: '%(asctime)s - %(levelname)s - %(message)s'
+
+# Optional: Custom date format for timestamps
+# datefmt: '%Y-%m-%d %H:%M:%S'
+
+# Example configurations for different scenarios:
+
+# For high-traffic environments (larger files, more backups):
+# log_file: /var/log/wp-updates.log
+# max_bytes: 52428800  # 50MB
+# backup_count: 10
+# log_level: WARNING
+
+# For debugging (more detailed logs, smaller files):
+# log_file: /var/log/wp-updates-debug.log
+# max_bytes: 5242880  # 5MB
+# backup_count: 3
+# log_level: DEBUG
+# format: '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'

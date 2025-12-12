@@ -37,9 +37,43 @@ If you want to include backups for core updates (recommended), change the core u
 0 1 * * * /var/opt/scripts/wp-update-suite/run.sh --all-containers --non-interactive --update-core >> /var/log/wp-core-updates.log 2>&1
 ```
 
-You can also combine multiple update types in a single cron job if you prefer fewer scheduled tasks. For example, a combined plugin + theme + DB schema update could be:
+## Log Rotation Feature
+
+The script now supports automatic log rotation with the `--rotate-logs` flag:
+
+### Basic Usage:
 ```bash
-0 6 * * * /var/opt/scripts/wp-update-suite/run.sh --all-containers --non-interactive --no-backup --update-plugins all --update-themes all --check-update-db-schema >> /var/log/wp-combined-updates.log 2>&1
+# Enable log rotation with default settings
+/var/opt/scripts/wp-update-suite/run.sh --rotate-logs --all-containers --non-interactive --update-plugins all
+
+# Use custom log configuration
+/var/opt/scripts/wp-update-suite/run.sh --rotate-logs --log-config /path/to/custom-config.yaml --all-containers --non-interactive --update-plugins all
+
+# Generate a YAML config template
+/var/opt/scripts/wp-update-suite/run.sh --print-rotate-log-yaml > log-config.yaml
+```
+
+### Default Settings:
+- **Log file**: `/var/log/wp-update-suite.log`
+- **Max file size**: 10MB
+- **Backup count**: 5 files
+- **Log level**: INFO
+
+### Custom Configuration:
+Create a YAML config file (see `log-config-sample.yaml` for examples) to customize:
+- Log file path and naming
+- Maximum file size before rotation
+- Number of backup files to keep
+- Log level and format
+- Date/time formatting
+
+### Cron Jobs with Log Rotation:
+```bash
+# Plugin updates with log rotation
+0 6 * * * /var/opt/scripts/wp-update-suite/run.sh --rotate-logs --all-containers --non-interactive --no-backup --update-plugins all
+
+# Core updates with custom log config
+0 1 * * * /var/opt/scripts/wp-update-suite/run.sh --rotate-logs --log-config /var/opt/scripts/wp-update-suite/log-config.yaml --all-containers --non-interactive --update-core
 ```
 
 ## Installation Instructions:
