@@ -58,6 +58,12 @@ The script now supports automatic log rotation with the `--rotate-logs` flag:
 - **Max file size**: 10MB
 - **Backup count**: 5 files
 - **Log level**: INFO
+- **Backup naming**: Numbered (`.log.1`, `.log.2`, etc.)
+
+### Optional Timestamped Backups:
+If you prefer timestamped backup filenames instead of numbered ones, you can uncomment the `namer` line in the `setup_log_rotation` function. This will create backups like:
+- `wp-update-suite.log.20251212_143000`
+- `wp-update-suite.log.20251211_143000`
 
 ### Custom Configuration:
 Create a YAML config file (see `log-config-sample.yaml` for examples) to customize:

@@ -14,6 +14,10 @@ backup_count: 5
 # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL (default: INFO)
 log_level: INFO
 
+# Optional: Backup naming style
+# Set to 'timestamped' to use timestamped backup names instead of numbered ones
+# backup_style: numbered  # Options: 'numbered' (default) or 'timestamped'
+
 # Log message format (default: '%(asctime)s - %(levelname)s - %(message)s')
 # Available format variables:
 # - %(asctime)s: Timestamp

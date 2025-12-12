@@ -156,6 +156,10 @@ def setup_log_rotation(rotate_logs: bool = False, config_path: Optional[str] = N
             maxBytes=log_config['max_bytes'],
             backupCount=log_config['backup_count']
         )
+        
+        # Optional: Use timestamped backup filenames instead of numbered ones
+        # Uncomment the line below to enable timestamped backup names
+        # file_handler.namer = lambda name: name.replace('.log', '') + f'.{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
         file_handler.setFormatter(logging.Formatter(log_config['format']))
         
         # Set log level
