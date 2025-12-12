@@ -16,10 +16,10 @@ if [ "${PASSTHRU_ARGS[0]:-}" = "docker" ]; then
     # Prefer 'docker compose' but fall back to 'docker-compose' if needed
     if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
         echo "Running via docker compose..."
-        docker compose run --rm wp-updater python3 /app/main.py --all-containers --non-interactive --no-backup --update-core --check-update-db-schema --update-plugins all --update-themes all "${PASSTHRU_ARGS[@]}"
+        docker compose run --rm wp-updater python3 /app/main.py "${PASSTHRU_ARGS[@]}"
     else
         echo "Running via docker-compose..."
-        docker-compose run --rm wp-updater python3 /app/main.py --all-containers --non-interactive --no-backup --update-core --check-update-db-schema --update-plugins all --update-themes all "${PASSTHRU_ARGS[@]}"
+        docker-compose run --rm wp-updater python3 /app/main.py "${PASSTHRU_ARGS[@]}"
     fi
 
 else
@@ -29,5 +29,5 @@ else
         exit 1
     fi
 
-    python3 "$MAIN_PATH" --all-containers --non-interactive --no-backup --update-core --check-update-db-schema --update-plugins all --update-themes all "${PASSTHRU_ARGS[@]}" >> /root/logs/wp-update-suite.log 2>&1
+    python3 "$MAIN_PATH" "${PASSTHRU_ARGS[@]}" 2>&1
 fi
