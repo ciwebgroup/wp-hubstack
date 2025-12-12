@@ -256,6 +256,7 @@ class WordPressUpdater:
             return False
 
         self.log(f"Backup created: {db_path}", logging.INFO)
+        logging.info(f"Backup task completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         return True
 
     def update_wordpress_core(self, container_name: str) -> bool:
@@ -277,6 +278,7 @@ class WordPressUpdater:
         result = self.docker_exec(container_name, ['wp', '--allow-root', 'core', 'update'])
         if result.returncode == 0:
             print(f"    ✅ WordPress core updated successfully")
+            logging.info(f"WordPress core update task completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             return True
         else:
             print(f"    ❌ WordPress core update failed: {result.stderr}")
@@ -423,6 +425,7 @@ class WordPressUpdater:
         success = self._run_compose_commands(working_dir)
         if success:
             print(f"    ✅ Compose-based core update performed successfully for '{service_name}'")
+            logging.info(f"Compose-based core update task completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             return True
         else:
             print(f"    ❌ Compose-based core update failed for '{service_name}'")
@@ -479,6 +482,7 @@ class WordPressUpdater:
         result = self.docker_exec(container_name, ['wp', '--allow-root', 'cache', 'flush'])
         if result.returncode == 0:
             print(f"    ✅ Cache flushed successfully")
+            logging.info(f"Plugin updates and cache flush task completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         else:
             print(f"    ❌ Cache flush failed: {result.stderr}")
         
@@ -530,6 +534,8 @@ class WordPressUpdater:
                 print(f"    ❌ Theme '{theme_name}' update failed: {result.stderr}")
                 success = False
         
+        if success:
+            logging.info(f"Theme updates task completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         return success
     
     def update_db_schema(self, container_name: str) -> bool:
@@ -546,6 +552,7 @@ class WordPressUpdater:
             print(f"    ✅ Database schema check/update completed.")
             if result.stdout and "already updated" not in result.stdout:
                 print(f"       Output: {result.stdout.strip()}")
+            logging.info(f"Database schema update task completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             return True
         else:
             print(f"    ❌ Database schema update failed: {result.stderr}")
@@ -590,6 +597,8 @@ class WordPressUpdater:
         else:
             print(f"    ℹ️ No Elementor plugin updates detected; skipping Elementor database update.")
         
+        if success:
+            logging.info(f"Rank Math and Elementor plugins update task completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         return success
 
     def print_dry_run_summary(self, selected_container: str, updates: Dict, 
@@ -970,6 +979,7 @@ class WordPressUpdater:
             if result.returncode != 0:
                 print(f"  ❌ Error starting containers: {result.stderr}")
             print(f"  ✅ Docker-compose stack restarted successfully")
+            logging.info(f"Docker compose restart task completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         except Exception as e:
             print(f"  ❌ Error restarting docker-compose: {e}")
         finally:
@@ -1016,6 +1026,7 @@ class WordPressUpdater:
             cmd = [script_path, '--include', container_name]
             result = subprocess.run(cmd, check=True, capture_output=True, text=True)
             self.log(f"Successfully mirrored assets for '{container_name}'.", logging.INFO)
+            logging.info(f"WP assets mirroring task completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             if result.stdout:
                 self.log(f"Script output:\n{result.stdout}", logging.DEBUG)
         except FileNotFoundError:
