@@ -809,15 +809,61 @@ class WordPressUpdater:
 
         print(f"    🔄 Checking for and applying database schema updates...")
         result = self.docker_exec(container_name, ['wp', '--allow-root', 'core', 'update-db'])
-        if result.returncode == 0:
+        stdout = (result.stdout or '').strip()
+        stderr = (result.stderr or '').strip()
+        combined = "\n".join([s for s in [stdout, stderr] if s]).strip()
+        combined_lower = combined.lower()
+
+        # WP-CLI sometimes emits benign PHP warnings on stderr even when the command succeeds.
+        # We only consider it a failure if there are strong error indicators.
+        strong_error_tokens = [
+            'php fatal error',
+            'fatal error',
+            'uncaught',
+            'exception',
+            'error:',
+            'failed opening required',
+            'failed to open stream',
+            'no such file or directory',
+            'wp-settings.php',
+        ]
+        has_strong_error = any(t in combined_lower for t in strong_error_tokens)
+
+        success_phrases = [
+            'success: wordpress database already at latest db version',
+            'success: wordpress database upgraded successfully',
+            'success: wordpress database updated successfully',
+        ]
+        has_success_phrase = any(p in combined_lower for p in success_phrases)
+
+        succeeded = (result.returncode == 0 and not has_strong_error) or (has_success_phrase and not has_strong_error)
+
+        if succeeded:
             print(f"    ✅ Database schema check/update completed.")
-            if result.stdout and "already updated" not in result.stdout:
-                print(f"       Output: {result.stdout.strip()}")
+            if 'already at latest db version' in combined_lower or 'already updated' in combined_lower or 'already up to date' in combined_lower:
+                print(f"       ℹ️ Database schema is already up to date")
+            else:
+                # Only print stdout if it contains something other than the common no-op status.
+                if stdout:
+                    print(f"       Output: {stdout}")
+
+            if stderr and ('warning' in stderr.lower() or 'deprecated' in stderr.lower()) and not has_strong_error:
+                print(f"       ⚠️ WP-CLI emitted warnings; see log for details")
+                logging.warning(
+                    f"Database schema update completed with warnings at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: {stderr[:2000]}"
+                )
+
             logging.info(f"Database schema update task completed successfully at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             return True
-        else:
-            print(f"    ❌ Database schema update failed: {result.stderr}")
-            return False
+
+        err_text = combined or stderr or stdout or f"nonzero exit code: {result.returncode}"
+        if len(err_text) > 2000:
+            err_text = err_text[:2000] + "... (truncated)"
+        print(f"    ❌ Database schema update failed: {err_text}")
+        logging.error(
+            f"Database schema update failed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} rc={result.returncode} output={err_text}"
+        )
+        return False
 
     def update_rank_math_elementor_plugins(self, container_name: str, plugins: list) -> bool:
         """
@@ -830,10 +876,21 @@ class WordPressUpdater:
             "elementor",
             "elementor-pro"
         ]
+        inventory = self._generate_inventory(container_name, 'plugin') or []
+        installed_slugs = {pl.get('name') for pl in inventory if isinstance(pl, dict) and pl.get('name')}
+
+        # Plugins that both exist in the environment and have an available update
         found_plugins = [p for p in plugin_order if any(pl['name'] == p for pl in plugins)]
-        if not found_plugins:
+        # Plugins that are present but do not currently have an available update
+        present_but_no_update = [p for p in plugin_order if p in installed_slugs and p not in found_plugins]
+
+        if not found_plugins and not present_but_no_update:
             print(f"    ℹ️ No Rank Math or Elementor plugins found; skipping related updates.")
             return True  # Nothing to do
+
+        if not found_plugins and present_but_no_update:
+            print(f"    ℹ️ Rank Math/Elementor plugins are installed but already up to date; no ordered updates needed.")
+            return True
 
         print(f"\n🔄 Updating Rank Math and Elementor plugins in required order:")
         success = True
