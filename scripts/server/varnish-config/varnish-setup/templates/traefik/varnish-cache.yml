@@ -1,0 +1,52 @@
+# =============================================================================
+# TRAEFIK VARNISH ROUTER TEMPLATE
+# =============================================================================
+# This is a template file. Replace placeholder values before use.
+#
+# Placeholders:
+#   {{ROUTER_NAME}}      - Unique router name (e.g., mysite-varnish)
+#   {{HOSTNAME}}         - Site hostname (e.g., mysite.com)
+# =============================================================================
+
+http:
+  # ===========================================================================
+  # VARNISH CACHE SERVICE
+  # ===========================================================================
+  services:
+    varnish-cache:
+      loadBalancer:
+        servers:
+          - url: "http://varnish:80"
+        passHostHeader: true
+        # Varnish has its own backend health checks
+
+  # ===========================================================================
+  # ROUTERS - Sites using Varnish cache
+  # ===========================================================================
+  routers:
+    # Example router - duplicate and modify for each site
+    {{ROUTER_NAME}}:
+      rule: "Host(`{{HOSTNAME}}`) || Host(`www.{{HOSTNAME}}`)"
+      entryPoints:
+        - websecure
+      service: varnish-cache
+      tls:
+        certResolver: le
+      middlewares:
+        - wordpress-security@file
+        - security-headers@file
+      # Higher priority than Docker-discovered routes
+      priority: 100
+
+    # Add more routers as needed:
+    # anothersite-varnish:
+    #   rule: "Host(`anothersite.com`) || Host(`www.anothersite.com`)"
+    #   entryPoints:
+    #     - websecure
+    #   service: varnish-cache
+    #   tls:
+    #     certResolver: le
+    #   middlewares:
+    #     - wordpress-security@file
+    #     - security-headers@file
+    #   priority: 100

@@ -1,0 +1,22 @@
+# Varnish Setup Script - Docker Compose
+# =====================================
+# Run: docker compose run --rm varnish-setup
+
+services:
+  varnish-setup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: varnish-setup
+    volumes:
+      # Mount Docker socket to manage containers
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Mount services directory for configuration
+      - /var/opt/services:/var/opt/services
+      # Mount scripts directory
+      - /var/opt/scripts:/var/opt/scripts
+    environment:
+      - SERVICES_DIR=/var/opt/services
+    stdin_open: true
+    tty: true
+    command: [ "python3", "/app/setup.py", "--services-dir", "/var/opt/services" ]
