@@ -15,8 +15,8 @@ SERVER_IP=$2
 
 # Load .env from the script's directory
 SCRIPT_DIR=$(dirname "$0")
-if [[ -f "$SCRIPT_DIR/.env" ]]; then
-  source "$SCRIPT_DIR/.env"
+if [[ -f "$SCRIPT_DIR/.env.cf-keys" ]]; then
+  source "$SCRIPT_DIR/.env.cf-keys"
 fi
 
 # --- Prerequisite Checks ---
@@ -24,8 +24,8 @@ if ! command -v jq &>/dev/null; then
     echo "Error: 'jq' is not installed." >&2
     exit 3
 fi
-if [[ -z "${CLOUDFLARE_EMAIL:-}" || -z "${CLOUDFLARE_API_KEY:-}" || -z "${NS1:-}" || -z "${NS2:-}" ]]; then
-    echo "Error: Cloudflare credentials/NS not set in .env" >&2
+if [[ -z "${CF_TOKEN:-}" || -z "${NS1:-}" || -z "${NS2:-}" ]]; then
+    echo "Error: CF_TOKEN or NS not set in .env" >&2
     exit 3
 fi
 
@@ -46,8 +46,7 @@ fi
 ZONE_RESPONSE=$(curl -s --request GET \
     --url "https://api.cloudflare.com/client/v4/zones?name=$DOMAIN" \
     --header "Content-Type: application/json" \
-    --header "X-Auth-Email: ${CLOUDFLARE_EMAIL}" \
-    --header "X-Auth-Key: ${CLOUDFLARE_API_KEY}")
+    --header "Authorization: Bearer ${CF_TOKEN}")
 
 if [[ $(echo "$ZONE_RESPONSE" | jq -r '.success') != "true" ]]; then
     echo "Error: Cloudflare API error getting Zone ID for $DOMAIN" >&2
@@ -62,8 +61,7 @@ fi
 
 RECORD_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records?type=A&name=$DOMAIN" \
     -H "Content-Type: application/json" \
-    -H "X-Auth-Email: $CLOUDFLARE_EMAIL" \
-    -H "X-Auth-Key: $CLOUDFLARE_API_KEY")
+    -H "Authorization: Bearer $CF_TOKEN")
 
 if [[ $(echo "$RECORD_RESPONSE" | jq -r '.success') != "true" ]]; then
     echo "Error: Cloudflare API error getting A records for $DOMAIN" >&2
