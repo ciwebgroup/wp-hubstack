@@ -11,6 +11,8 @@ SEARCH_DIR="/var/opt/sites"
 # Default flags
 DRY_RUN=false
 RESTART=false
+OVERWRITE=false
+TIER=""
 APPLY_PHP_FPM=false
 APPLY_PHP_LIMITS=false
 INCLUDE_PATTERN=""
@@ -40,6 +42,15 @@ OPTIONS:
     
     --php-limits        Apply PHP execution limits configuration
                         (mounts: php-limits.ini -> /usr/local/etc/php/conf.d/99-limits.ini)
+    
+    --overwrite         Overwrite existing configurations
+                        (by default, skips sites that already have configs)
+    
+    --tier TIER         Use tiered configuration (1, 2, or 3)
+                        Tier 1: High-traffic (2-3 sites/server, 15 workers, 512M)
+                        Tier 2: Medium-traffic (5-7 sites/server, 10 workers, 384M)
+                        Tier 3: Low-traffic (10-20 sites/server, 5 workers, 256M)
+                        (automatically enables --php-fpm and --php-limits)
     
     --help              Show this help message
 
@@ -76,6 +87,15 @@ EXAMPLES:
     
     # Apply all configurations with PHP optimizations
     $(basename "$0") --php-fpm --php-limits --restart
+    
+    # Overwrite existing configurations (update to new tier)
+    $(basename "$0") --overwrite --php-fpm --php-limits --restart
+    
+    # Deploy Tier 2 configuration to specific sites
+    $(basename "$0") --tier 2 --include "example.com,mysite.com" --restart
+    
+    # Deploy Tier 3 to all low-traffic sites
+    $(basename "$0") --tier 3 --exclude "bigstore.com" --restart
 
 EOF
     exit 0
@@ -100,6 +120,14 @@ while [[ $# -gt 0 ]]; do
             APPLY_PHP_LIMITS=true
             shift
             ;;
+        --overwrite)
+            OVERWRITE=true
+            shift
+            ;;
+        --tier)
+            TIER="$2"
+            shift 2
+            ;;
         --include)
             INCLUDE_PATTERN="$2"
             shift 2
@@ -118,6 +146,60 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Handle tier configuration
+if [[ -n "$TIER" ]]; then
+    # Validate tier
+    if [[ ! "$TIER" =~ ^[123]$ ]]; then
+        echo "Error: Invalid tier '$TIER'. Must be 1, 2, or 3"
+        exit 1
+    fi
+    
+    # Switch to tier-specific configuration files
+    CONF_FILE="mpm_prefork.conf.tier${TIER}"
+    PHP_FPM_CONF="php-fpm-pool.conf.tier${TIER}"
+    PHP_LIMITS_INI="php-limits.ini.tier${TIER}"
+    
+    # Verify tier config files exist
+    for file in "$CONF_FILE" "$PHP_FPM_CONF" "$PHP_LIMITS_INI"; do
+        if [[ ! -f "$SOURCE_CONF_DIR/$file" ]]; then
+            echo "Error: Tier configuration file not found: $file"
+            exit 1
+        fi
+    done
+    
+    # Automatically enable PHP configurations for tiered deployments
+    APPLY_PHP_FPM=true
+    APPLY_PHP_LIMITS=true
+    
+    # Display tier info
+    echo "=========================================="
+    echo "Tiered Configuration Deployment"
+    echo "=========================================="
+    echo ""
+    echo "Tier: $TIER"
+    case $TIER in
+        1)
+            echo "  Type: High-Traffic Sites"
+            echo "  Workers: 15 max"
+            echo "  Memory: 512M per process"
+            echo "  Capacity: 2-3 sites per 16GB server"
+            ;;
+        2)
+            echo "  Type: Medium-Traffic Sites"
+            echo "  Workers: 10 max"
+            echo "  Memory: 384M per process"
+            echo "  Capacity: 5-7 sites per 16GB server"
+            ;;
+        3)
+            echo "  Type: Low-Traffic Sites"
+            echo "  Workers: 5 max"
+            echo "  Memory: 256M per process"
+            echo "  Capacity: 10-20 sites per 16GB server"
+            ;;
+    esac
+    echo ""
+fi
 
 # Check if yq is installed
 if ! command -v yq &> /dev/null; then
@@ -204,11 +286,15 @@ find "$SEARCH_DIR" -maxdepth 2 -name "docker-compose.yml" | while read -r compos
         echo "Found WordPress container in: $site_name"
         echo "Path: $site_dir"
         
-        # Check if volume is already present
+        # Check if volume is already present (skip if --overwrite is set)
         if grep -q "mpm_prefork.conf:/etc/apache2/mods-available/mpm_prefork.conf" "$compose_file"; then
-            echo "[ALREADY CONFIGURED] Configuration already present in docker-compose.yml."
-            TOTAL_ALREADY_CONFIGURED=$((TOTAL_ALREADY_CONFIGURED + 1))
-            continue
+            if [ "$OVERWRITE" = false ]; then
+                echo "[ALREADY CONFIGURED] Configuration already present in docker-compose.yml."
+                TOTAL_ALREADY_CONFIGURED=$((TOTAL_ALREADY_CONFIGURED + 1))
+                continue
+            else
+                echo "[OVERWRITE MODE] Updating existing configuration..."
+            fi
         fi
         
         if [ "$DRY_RUN" = true ]; then

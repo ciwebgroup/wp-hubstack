@@ -1,0 +1,10 @@
+# Tier 1: High-Traffic Sites (2-3 sites per server)
+# Use for: Primary revenue sites, high-traffic WooCommerce stores
+
+<IfModule mpm_prefork_module>
+    StartServers             3
+    MinSpareServers          3
+    MaxSpareServers          6
+    MaxRequestWorkers        15
+    MaxConnectionsPerChild   500
+</IfModule>

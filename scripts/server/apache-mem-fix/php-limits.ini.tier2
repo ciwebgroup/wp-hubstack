@@ -1,26 +1,29 @@
+; Tier 2: Medium-Traffic Sites (5-7 sites per server)
+; Use for: Standard business sites, moderate WooCommerce stores
+
 ; Execution limits
 max_execution_time = 300
 max_input_time = 300
-memory_limit = 512M
+memory_limit = 384M
 
 ; Upload limits
-post_max_size = 128M
-upload_max_filesize = 128M
+post_max_size = 96M
+upload_max_filesize = 96M
 
 ; Input limits (for large forms - WooCommerce, page builders)
-max_input_vars = 5000
+max_input_vars = 4000
 max_input_nesting_level = 64
 
 ; Opcache settings (performance boost)
 opcache.enable = 1
-opcache.memory_consumption = 256
-opcache.interned_strings_buffer = 16
-opcache.max_accelerated_files = 10000
+opcache.memory_consumption = 192
+opcache.interned_strings_buffer = 12
+opcache.max_accelerated_files = 7500
 opcache.revalidate_freq = 60
 opcache.validate_timestamps = 1
 opcache.fast_shutdown = 1
 opcache.enable_cli = 0
 
 ; Realpath cache (performance)
-realpath_cache_size = 4096K
+realpath_cache_size = 3072K
 realpath_cache_ttl = 600

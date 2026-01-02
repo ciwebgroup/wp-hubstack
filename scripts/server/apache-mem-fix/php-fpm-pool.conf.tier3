@@ -1,0 +1,16 @@
+# Tier 3: Low-Traffic Sites (10-20 sites per server)
+# Use for: Blogs, brochure sites, low-traffic informational sites
+
+[www]
+pm = dynamic
+pm.max_children = 5
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 3
+pm.max_requests = 500
+pm.process_idle_timeout = 30s
+
+; Monitoring endpoints
+pm.status_path = /status
+ping.path = /ping
+ping.response = pong

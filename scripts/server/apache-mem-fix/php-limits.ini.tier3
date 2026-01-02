@@ -1,0 +1,29 @@
+; Tier 3: Low-Traffic Sites (10-20 sites per server)
+; Use for: Blogs, brochure sites, low-traffic informational sites
+
+; Execution limits
+max_execution_time = 300
+max_input_time = 300
+memory_limit = 256M
+
+; Upload limits
+post_max_size = 64M
+upload_max_filesize = 64M
+
+; Input limits
+max_input_vars = 3000
+max_input_nesting_level = 64
+
+; Opcache settings (performance boost)
+opcache.enable = 1
+opcache.memory_consumption = 128
+opcache.interned_strings_buffer = 8
+opcache.max_accelerated_files = 5000
+opcache.revalidate_freq = 60
+opcache.validate_timestamps = 1
+opcache.fast_shutdown = 1
+opcache.enable_cli = 0
+
+; Realpath cache (performance)
+realpath_cache_size = 2048K
+realpath_cache_ttl = 600

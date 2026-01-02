@@ -1,0 +1,10 @@
+# Tier 2: Medium-Traffic Sites (5-7 sites per server)
+# Use for: Standard business sites, moderate WooCommerce stores
+
+<IfModule mpm_prefork_module>
+    StartServers             2
+    MinSpareServers          2
+    MaxSpareServers          4
+    MaxRequestWorkers        10
+    MaxConnectionsPerChild   500
+</IfModule>
