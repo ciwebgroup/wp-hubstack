@@ -1,0 +1,17 @@
+# Example Docker Compose resource limits
+# Add this to your docker-compose.yml under the WordPress service
+
+services:
+    wp_example:
+        # ... existing config ...
+        deploy:
+            resources:
+                limits:
+                    cpus: '1.5'
+                    memory: 1G
+                reservations:
+                    cpus: '0.5'
+                    memory: 512M
+        # Add CPU throttling
+        ulimits:
+            nproc: 20  # Limit number of processes
