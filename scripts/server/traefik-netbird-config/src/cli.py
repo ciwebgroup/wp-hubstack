@@ -1,14 +1,17 @@
 """CLI interface for Traefik Config Manager."""
 
 from pathlib import Path
-from typing import Optional
 
 import click
+from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 from .manager import TraefikConfigManager
+
+# Load .env file from current directory if it exists
+load_dotenv()
 
 console = Console()
 
@@ -47,7 +50,13 @@ def main() -> None:
     default=False,
     help="Also apply iptables rules from config (requires root)",
 )
-def add(traefik_dir: Path, config: Path, dry_run: bool, apply_iptables: bool) -> None:
+@click.option(
+    "--restart",
+    is_flag=True,
+    default=False,
+    help="Restart Traefik container after applying changes",
+)
+def add(traefik_dir: Path, config: Path, dry_run: bool, apply_iptables: bool, restart: bool) -> None:
     """Add configuration to Traefik docker-compose.yml."""
     manager = TraefikConfigManager(traefik_dir)
 
@@ -61,14 +70,15 @@ def add(traefik_dir: Path, config: Path, dry_run: bool, apply_iptables: bool) ->
         console.print(Panel("[yellow]DRY RUN MODE[/yellow] - No changes will be made"))
 
     try:
-        changes, backup, iptables_results = manager.apply_additions(
-            config, dry_run=dry_run, apply_iptables=apply_iptables
+        results = manager.apply_additions(
+            config, dry_run=dry_run, apply_iptables=apply_iptables, restart=restart
         )
     except Exception as e:
         console.print(f"[red]Error applying additions:[/red] {e}")
         raise SystemExit(1)
 
     # Display compose changes
+    changes = results.get("compose_changes", {})
     if any(changes.values()):
         table = Table(title="Docker Compose Changes")
         table.add_column("Category", style="cyan")
@@ -81,6 +91,7 @@ def add(traefik_dir: Path, config: Path, dry_run: bool, apply_iptables: bool) ->
 
         console.print(table)
 
+        backup = results.get("backup")
         if backup and not dry_run:
             console.print(
                 f"\n[green]✓[/green] Backup created: [blue]{backup.path.name}[/blue]"
@@ -91,7 +102,23 @@ def add(traefik_dir: Path, config: Path, dry_run: bool, apply_iptables: bool) ->
     else:
         console.print("[yellow]No new compose items to add[/yellow] - all items already exist")
 
+    # Display dynamic copy results
+    dynamic_copy = results.get("dynamic_copy")
+    if dynamic_copy:
+        console.print("\n")
+        dyn_table = Table(title="Dynamic Config Files")
+        dyn_table.add_column("Action", style="cyan")
+        dyn_table.add_column("File", style="green")
+
+        for f in dynamic_copy.get("copied", []):
+            dyn_table.add_row("Copied", f)
+        for err in dynamic_copy.get("errors", []):
+            dyn_table.add_row("[red]Error[/red]", err)
+
+        console.print(dyn_table)
+
     # Display iptables results
+    iptables_results = results.get("iptables")
     if iptables_results:
         console.print("\n")
         ipt_table = Table(title="IPTables Rules")
@@ -111,6 +138,14 @@ def add(traefik_dir: Path, config: Path, dry_run: bool, apply_iptables: bool) ->
             console.print("[green]✓[/green] IPTables rules applied and persisted")
         elif dry_run:
             console.print("[yellow]→[/yellow] IPTables dry run - no rules applied")
+
+    # Display restart result
+    restart_result = results.get("restart")
+    if restart_result:
+        if restart_result.get("success"):
+            console.print(f"\n[green]✓[/green] {restart_result.get('message')}")
+        else:
+            console.print(f"\n[red]✗[/red] {restart_result.get('message')}")
 
 
 

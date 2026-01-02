@@ -1,0 +1,1 @@
+ssh root@wp%d.ciwgserver.com 'cd /var/opt/scripts/traefik-netbird-config && chmod +x ./iptables-netbird.sh && ./iptables-netbird.sh && docker compose -f docker-compose.manager.yml run --rm traefik-config add --traefik-dir /traefik --config /additions.yml && cd /var/opt/services/traefik && docker compose down && docker compose up -d'

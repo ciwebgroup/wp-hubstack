@@ -111,6 +111,7 @@ class TraefikAdditionsConfig(BaseModel):
 
     traefik: ConfigAdditions = Field(default_factory=ConfigAdditions)
     iptables: Optional[IPTablesConfig] = Field(None, description="IPTables rules to apply")
+    copy_dynamic: Optional[str] = Field(None, description="Source directory to copy to traefik/dynamic")
 
 
 class BackupInfo(BaseModel):

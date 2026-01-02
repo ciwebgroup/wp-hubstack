@@ -36,9 +36,9 @@ traefik:
   volumes:
     - "./dynamic:/etc/traefik/dynamic:ro"
 
-  # Labels to add
-  labels:
-    - "traefik.http.middlewares.custom-headers.headers.customrequestheaders.X-Forwarded-Proto=https"
+# Copy dynamic config files from this directory to traefik/dynamic
+# This path is relative to where the config manager is running
+copy_dynamic: /dynamic
 
 # IPTables firewall rules for NetBird VPN lockdown
 # These rules restrict port 8082 to ONLY be accessible via the NetBird VPN (wt0 interface)

@@ -1,12 +1,22 @@
+# Traefik Config Manager - Docker Compose
+#
+# Usage:
+#   TRAEFIK_DIR=/var/opt/services/traefik docker compose -f docker-compose.manager.yml run --rm traefik-config \
+#       add --traefik-dir /traefik --config /traefik/additions.yml --dry-run
+#
+# The TRAEFIK_DIR env var specifies the HOST path to mount into the container at /traefik
+
 services:
   traefik-config:
     build: .
     container_name: traefik-config-manager
     volumes:
-      # Mount Docker socket for container management
+      # Mount Docker socket for container management (needed for rollback restarts)
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Mount the Traefik directory (configurable via env)
+      # Mount the Traefik directory from host -> /traefik in container
       - ${TRAEFIK_DIR:-.}:/traefik
+      - ./additions.yml:/additions.yml
+      - ./dynamic:/dynamic
     working_dir: /traefik
-    environment:
-      - TRAEFIK_DIR=/traefik
+    # Default command shows help - override with 'add', 'rollback', etc.
+    command: [ "--help" ]

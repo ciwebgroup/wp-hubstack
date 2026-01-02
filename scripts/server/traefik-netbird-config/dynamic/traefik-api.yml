@@ -1,0 +1,7 @@
+http:
+  routers:
+    traefik-api:
+      rule: "PathPrefix(`/api`)"
+      entryPoints: ["metrics"]
+      service: api@internal
+      priority: 1

@@ -22,6 +22,10 @@ dev = [
 [project.scripts]
 traefik-config = "src.cli:main"
 
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
@@ -29,6 +33,10 @@ warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+module = "dotenv"
+ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100

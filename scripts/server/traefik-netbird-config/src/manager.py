@@ -288,12 +288,72 @@ class TraefikConfigManager:
 
         return results
 
+    def copy_dynamic_config(
+        self, source_dir: Path, dry_run: bool = False
+    ) -> Dict[str, List[str]]:
+        """
+        Copy dynamic configuration files to traefik/dynamic directory.
+
+        Args:
+            source_dir: Source directory containing dynamic config files
+            dry_run: If True, don't copy files
+
+        Returns:
+            Dictionary with 'copied' files list
+        """
+        results: Dict[str, List[str]] = {
+            "copied": [],
+            "errors": [],
+        }
+
+        target_dir = self.traefik_dir / "dynamic"
+
+        if not source_dir.exists():
+            results["errors"].append(f"Source directory not found: {source_dir}")
+            return results
+
+        # Get list of files to copy
+        files_to_copy = list(source_dir.glob("*.yml")) + list(source_dir.glob("*.yaml"))
+
+        for src_file in files_to_copy:
+            dest_file = target_dir / src_file.name
+            if dry_run:
+                results["copied"].append(f"{src_file.name} -> {dest_file}")
+            else:
+                try:
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src_file, dest_file)
+                    results["copied"].append(f"{src_file.name} -> {dest_file}")
+                except Exception as e:
+                    results["errors"].append(f"{src_file.name}: {e}")
+
+        return results
+
+    def restart_traefik(self) -> Tuple[bool, str]:
+        """
+        Restart Traefik using docker compose.
+
+        Returns:
+            Tuple of (success, message)
+        """
+        try:
+            subprocess.run(
+                ["docker", "compose", "restart", "traefik"],
+                cwd=self.traefik_dir,
+                check=True,
+                capture_output=True,
+            )
+            return True, "Traefik container restarted"
+        except subprocess.CalledProcessError as e:
+            return False, f"Failed to restart Traefik: {e.stderr.decode()}"
+
     def apply_additions(
         self,
         additions_path: Path,
         dry_run: bool = False,
         apply_iptables: bool = False,
-    ) -> Tuple[Dict[str, List[str]], Optional[BackupInfo], Optional[Dict[str, List[str]]]]:
+        restart: bool = False,
+    ) -> Dict[str, Any]:
         """
         Apply additions from a YAML file to docker-compose.yml.
 
@@ -301,22 +361,42 @@ class TraefikConfigManager:
             additions_path: Path to additions YAML file
             dry_run: If True, don't write changes
             apply_iptables: If True, also apply iptables rules
+            restart: If True, restart Traefik after changes
 
         Returns:
-            Tuple of (compose changes, backup info, iptables results)
+            Dictionary containing all results
         """
         self.validate_directory()
 
         config = self.load_additions(additions_path)
+        results: Dict[str, Any] = {
+            "backup": None,
+            "compose_changes": {},
+            "dynamic_copy": None,
+            "iptables": None,
+            "restart": None,
+        }
 
-        backup: Optional[BackupInfo] = None
+        # Create backup before changes (unless dry run)
         if not dry_run:
-            backup = self.create_backup()
+            results["backup"] = self.create_backup()
 
-        changes = self.merge_additions(config.traefik, dry_run=dry_run)
+        # Merge compose changes
+        results["compose_changes"] = self.merge_additions(config.traefik, dry_run=dry_run)
 
-        iptables_results: Optional[Dict[str, List[str]]] = None
+        # Copy dynamic config if specified
+        if config.copy_dynamic:
+            source_dir = Path(config.copy_dynamic)
+            results["dynamic_copy"] = self.copy_dynamic_config(source_dir, dry_run=dry_run)
+
+        # Apply iptables rules
         if apply_iptables and config.iptables:
-            iptables_results = self.apply_iptables(config.iptables, dry_run=dry_run)
+            results["iptables"] = self.apply_iptables(config.iptables, dry_run=dry_run)
 
-        return changes, backup, iptables_results
+        # Restart Traefik if requested
+        if restart and not dry_run:
+            success, msg = self.restart_traefik()
+            results["restart"] = {"success": success, "message": msg}
+
+        return results
+
