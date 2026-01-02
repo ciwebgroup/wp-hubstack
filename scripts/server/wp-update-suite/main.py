@@ -890,6 +890,24 @@ class WordPressUpdater:
 
         if not found_plugins and present_but_no_update:
             print(f"    ℹ️ Rank Math/Elementor plugins are installed but already up to date; no ordered updates needed.")
+            # Even when no plugin updates are needed, ensure Elementor DB is current if Elementor is installed.
+            if any(slug in installed_slugs for slug in ("elementor", "elementor-pro")):
+                status = self._check_or_update_elementor_db(container_name)
+                if status == 'already-up-to-date':
+                    print(f"       ✅ Elementor database is already up to date")
+                    logging.info(
+                        f"Elementor database check: already up to date at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                elif status == 'updated':
+                    print(f"       🔄 Elementor database update applied")
+                    logging.info(
+                        f"Elementor database update applied at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                elif status == 'failed':
+                    print(f"       ⚠️  Elementor database update check failed")
+                    logging.warning(
+                        f"Elementor database check/update failed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
             return True
 
         print(f"\n🔄 Updating Rank Math and Elementor plugins in required order:")
