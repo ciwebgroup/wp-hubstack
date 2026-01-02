@@ -1,0 +1,12 @@
+services:
+  traefik-config:
+    build: .
+    container_name: traefik-config-manager
+    volumes:
+      # Mount Docker socket for container management
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Mount the Traefik directory (configurable via env)
+      - ${TRAEFIK_DIR:-.}:/traefik
+    working_dir: /traefik
+    environment:
+      - TRAEFIK_DIR=/traefik

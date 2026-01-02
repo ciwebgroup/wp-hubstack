@@ -1,0 +1,42 @@
+[project]
+name = "traefik-config-manager"
+version = "1.0.0"
+description = "Type-safe CLI tool for managing Traefik docker-compose configurations"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1.0",
+    "pydantic>=2.0.0",
+    "ruamel.yaml>=0.18.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.8.0",
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+traefik-config = "src.cli:main"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"

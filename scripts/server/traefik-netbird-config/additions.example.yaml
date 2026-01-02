@@ -1,0 +1,104 @@
+# Traefik Config Manager - Additions Configuration
+# This file defines additions to docker-compose.yml and optional iptables rules
+#
+# Apply with:
+#   traefik-config add --traefik-dir /path/to/traefik --config additions.yaml
+#
+# Dry-run preview:
+#   traefik-config add --traefik-dir /path/to/traefik --config additions.yaml --dry-run
+#
+# With iptables (requires root):
+#   sudo traefik-config add --traefik-dir /path/to/traefik --config additions.yaml --apply-iptables
+
+traefik:
+  # Commands to add to Traefik service
+  command:
+    # Enable insecure API (for internal access)
+    - "--api.insecure=true"
+    
+    # Prometheus metrics endpoint
+    - "--entrypoints.metrics.address=:8083"
+    - "--metrics.prometheus=true"
+    - "--metrics.prometheus.entrypoint=metrics"
+    - "--metrics.prometheus.addEntryPointsLabels=true"
+    - "--metrics.prometheus.addRoutersLabels=true"
+    - "--metrics.prometheus.addServicesLabels=true"
+    
+    # Dynamic file provider
+    - "--providers.file.directory=/etc/traefik/dynamic"
+    - "--providers.file.watch=true"
+
+  # Ports to expose
+  ports:
+    - "8082:8082"
+    - "8083:8083"
+
+  # Volumes to mount
+  volumes:
+    - "./dynamic:/etc/traefik/dynamic:ro"
+
+  # Labels to add
+  labels:
+    - "traefik.http.middlewares.custom-headers.headers.customrequestheaders.X-Forwarded-Proto=https"
+
+# IPTables firewall rules for NetBird VPN lockdown
+# These rules restrict port 8082 to ONLY be accessible via the NetBird VPN (wt0 interface)
+iptables:
+  # Remove existing rules before applying new ones
+  cleanup_first: true
+  
+  # Save rules with netfilter-persistent for persistence across reboots
+  persist: true
+  
+  rules:
+    # === DOCKER-USER Chain (PRIMARY PROTECTION) ===
+    # These rules are REQUIRED for Docker port mappings
+    
+    # Allow access from NetBird VPN (wt0 interface)
+    - chain: DOCKER-USER
+      position: 1
+      protocol: tcp
+      dport: 8082
+      interface: wt0
+      action: ACCEPT
+    
+    # Block localhost (defense in depth)
+    - chain: DOCKER-USER
+      position: 2
+      protocol: tcp
+      dport: 8082
+      source: 127.0.0.1
+      action: DROP
+    
+    # Block everything else
+    - chain: DOCKER-USER
+      position: 3
+      protocol: tcp
+      dport: 8082
+      action: DROP
+    
+    # === INPUT Chain (BACKUP DEFENSE) ===
+    # These rules provide defense-in-depth if Docker is removed
+    
+    # Allow access from NetBird VPN
+    - chain: INPUT
+      position: 2
+      protocol: tcp
+      dport: 8082
+      interface: wt0
+      action: ACCEPT
+    
+    # Block localhost
+    - chain: INPUT
+      position: 3
+      protocol: tcp
+      dport: 8082
+      source: 127.0.0.1
+      action: DROP
+    
+    # Block everything else
+    - chain: INPUT
+      position: 4
+      protocol: tcp
+      dport: 8082
+      action: DROP

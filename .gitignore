@@ -2,3 +2,5 @@ scripts/utils/*.json
 scripts/server/process-cancellations/*.json
 scripts/server/process-backups/*.json
 scripts/server/.env*
+scripts/server/traefik-netbird-config/.venv
+scripts/server/traefik-netbird-config/src/__pycache__
