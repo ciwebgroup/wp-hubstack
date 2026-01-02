@@ -1,0 +1,6 @@
+domain,server,container_name,site_path
+example.com,server01.example.com,wp_example_com,/var/opt/sites/example.com
+test.com,server01.example.com,wp_test_com,/var/opt/sites/test.com
+demo.com,server02.example.com,wp_demo_com,/var/opt/sites/demo.com
+sample.com,server02.example.com,wp_sample_com,/var/opt/sites/sample.com
+mysite.com,server03.example.com,wp_mysite_com,/var/opt/sites/mysite.com

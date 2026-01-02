@@ -1,0 +1,10 @@
+# Tier 3: Low-Traffic Sites (10-20 sites per server)
+# Use for: Blogs, brochure sites, low-traffic informational sites
+
+<IfModule mpm_prefork_module>
+    StartServers             1
+    MinSpareServers          1
+    MaxSpareServers          3
+    MaxRequestWorkers        5
+    MaxConnectionsPerChild   500
+</IfModule>

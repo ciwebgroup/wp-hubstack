@@ -1,0 +1,11 @@
+{
+  "sites": [
+    {
+      "domain": "bigstore.com",
+      "server": "server01.example.com",
+      "container_name": "wp_bigstore_com",
+      "site_path": "/var/opt/sites/bigstore.com",
+      "assigned_tier": 1
+    }
+  ]
+}

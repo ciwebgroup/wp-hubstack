@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  site-optimizer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: site-optimizer:latest
+    container_name: site-optimizer
+    volumes:
+      # Mount data directory for persistence
+      - ./data:/app/data
+      # Mount config directory for tier configurations
+      - ./config:/app/config:ro
+      # Mount credentials directory
+      - ./credentials:/app/credentials:ro
+      # Mount SSH keys if needed
+      - ${SSH_KEY_PATH:-~/.ssh}:/home/optimizer/.ssh:ro
+    environment:
+      # Google Analytics
+      - GA_PROPERTY_ID=${GA_PROPERTY_ID:-}
+      - GA_CREDENTIALS_PATH=/app/credentials/ga-service-account.json
+
+      # Tier Thresholds
+      - TIER1_MIN_VISITORS=${TIER1_MIN_VISITORS:-10000}
+      - TIER2_MIN_VISITORS=${TIER2_MIN_VISITORS:-1000}
+
+      # Deployment Settings
+      - DRY_RUN=${DRY_RUN:-true}
+      - PARALLEL_DEPLOYMENTS=${PARALLEL_DEPLOYMENTS:-5}
+      - SSH_USER=${SSH_USER:-deploy}
+
+      # Paths
+      - SEARCH_DIR=${SEARCH_DIR:-/var/opt/sites}
+      - CONFIG_DIR=/app/config
+      - DATA_DIR=/app/data
+    stdin_open: true
+    tty: true
+    networks:
+      - site-optimizer-net
+
+networks:
+  site-optimizer-net:
+    driver: bridge
