@@ -343,6 +343,22 @@ find "$SEARCH_DIR" -maxdepth 2 -name "docker-compose.yml" | while read -r compos
 
             # 3. Apply changes with yq
             echo "Patching docker-compose.yml..."
+            
+            # Remove existing config mounts first to prevent duplicates
+            # This is important when using --overwrite or when re-running the script
+            echo "Removing any existing configuration mounts..."
+            yq -i '(.services[] | select(.container_name | test("^wp_"))).volumes |= (map(select(. | test("mpm_prefork.conf:/etc/apache2/mods-available/mpm_prefork.conf") | not)))' "$compose_file"
+            
+            if [ "$APPLY_PHP_FPM" = true ]; then
+                yq -i '(.services[] | select(.container_name | test("^wp_"))).volumes |= (map(select(. | test("'$PHP_FPM_CONF':/usr/local/etc/php-fpm.d/www.conf") | not)))' "$compose_file"
+            fi
+            
+            if [ "$APPLY_PHP_LIMITS" = true ]; then
+                yq -i '(.services[] | select(.container_name | test("^wp_"))).volumes |= (map(select(. | test("'$PHP_LIMITS_INI':/usr/local/etc/php/conf.d/99-limits.ini") | not)))' "$compose_file"
+            fi
+            
+            # Now add the volume mounts (guaranteed no duplicates)
+            echo "Adding configuration volume mounts..."
             yq -i '(.services[] | select(.container_name | test("^wp_"))).volumes += ["./mpm_prefork.conf:/etc/apache2/mods-available/mpm_prefork.conf"]' "$compose_file"
             
             if [ "$APPLY_PHP_FPM" = true ]; then
