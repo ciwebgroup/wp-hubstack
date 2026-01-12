@@ -1,0 +1,59 @@
+networks:
+  cache:
+    name: cache
+    driver: bridge
+  web:
+    external: true
+
+services:
+  redis:
+    image: redis:alpine
+    container_name: redis
+    restart: always
+    command: [ "redis-server", "--appendonly", "yes" ]
+    networks:
+      - "cache"
+    volumes:
+      - "./redis_data:/data"
+    labels:
+      - "traefik.enable=false"
+
+  # =========================================================================
+  # VARNISH CACHE - Speed-optimized HTTP cache
+  # =========================================================================
+  # Varnish sits between Traefik and WordPress, providing:
+  # - Fast in-memory caching for static files (30 days)
+  # - HTML page caching (10 minutes)
+  # - WordPress-aware bypass rules (admin, logged-in users, cart)
+  # =========================================================================
+  varnish:
+    image: varnish:7.6-alpine
+    container_name: varnish
+    restart: always
+    volumes:
+      - ./varnish/default.vcl:/etc/varnish/default.vcl:ro
+    command: >
+      varnishd
+      -F
+      -f /etc/varnish/default.vcl
+      -a :80
+      -s malloc,512M
+      -p default_ttl=600
+    networks:
+      - cache
+      - web
+    labels:
+      - "traefik.enable=false"
+    healthcheck:
+      test: ["CMD", "varnishadm", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+#  memcached:
+#    image: memcached:alpine
+#    container_name: memcached
+#    networks:
+#      - wordpress_network
+#    command: memcached -m 128
+#
