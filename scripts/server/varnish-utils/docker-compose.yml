@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  varnish-utils:
+    build: .
+    image: varnish-utils:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config:/workdir/config:ro
+      - ./:/workdir
+    tty: true
+    stdin_open: true
+    # Keep network isolated; the tool uses `docker` to interact with varnish container
+    # If you prefer the tool to directly reach backends on the host network, set network_mode: host
+    # network_mode: host
