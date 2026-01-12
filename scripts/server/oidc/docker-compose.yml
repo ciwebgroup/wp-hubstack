@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  fix-oidc-settings:
+    build: .
+    container_name: fix-oidc-settings
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./oidc_backups:/data/backups
+    environment:
+      - BACKUP_DIR=/data/backups
+      - CLIENT_ID=${CLIENT_ID:-ciwg_wordpress_sso_client_id}
+      - CLIENT_SECRET=${CLIENT_SECRET:-ciwg_wordpress_sso_client_secret}
+    tty: true
+    stdin_open: true
+    restart: 'no'
