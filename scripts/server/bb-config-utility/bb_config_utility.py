@@ -79,7 +79,22 @@ def write_yaml_file(path: Path, data: Dict, dry_run: bool):
             yaml.safe_dump(data, fh, sort_keys=False)
 
 
-def patch_compose_yaml(compose_path: Path, service_container_name: str, site_name: str, dry_run: bool):
+def backup_compose_file(compose_path: Path) -> Path:
+    """Create a timestamped backup of the compose file."""
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = compose_path.parent / f"{compose_path.stem}.backup.{timestamp}{compose_path.suffix}"
+    import shutil
+    shutil.copy2(compose_path, backup_path)
+    print(f"Created backup: {backup_path}")
+    return backup_path
+
+
+def patch_compose_yaml(compose_path: Path, service_container_name: str, site_name: str, dry_run: bool, rollback: bool = False):
+    # Create backup if rollback is enabled
+    if rollback and not dry_run:
+        backup_compose_file(compose_path)
+    
     # Load compose
     with open(compose_path, "r", encoding="utf-8") as fh:
         orig = yaml.safe_load(fh)
@@ -174,10 +189,12 @@ def main():
     parser.add_argument("--include", help="Comma-separated names to include (filter)")
     parser.add_argument("--exclude", help="Comma-separated names to exclude")
     parser.add_argument("--dry-run", action="store_true", help="Show planned changes, don't write")
+    parser.add_argument("--rollback", action="store_true", help="Create timestamped backups of docker-compose.yml files before modifying them")
 
     args = parser.parse_args()
 
     dry_run = args.dry_run
+    rollback = args.rollback
 
     if args.traefik_config:
         traefik_workdir = Path(args.traefik_config).resolve()
@@ -274,7 +291,7 @@ def main():
 
         # Patch site compose to add labels
         try:
-            patch_compose_yaml(Path(site_compose), container, site_name, dry_run)
+            patch_compose_yaml(Path(site_compose), container, site_name, dry_run, rollback)
         except Exception as exc:
             print(f"Failed to patch compose for {container}: {exc}")
 
