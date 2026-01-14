@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  bb-config-utility:
+    build: .
+    image: bb-config-utility:latest
+    container_name: bb-config-utility
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/opt:/var/opt:rw
+    environment:
+      - PYTHONUNBUFFERED=1
+    tty: true
+    stdin_open: true
