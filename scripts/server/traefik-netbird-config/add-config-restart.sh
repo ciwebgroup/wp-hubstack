@@ -1,3 +1,3 @@
 #!/bin/bash
 
-docker compose run --rm traefik-netbird-config add -d /traefik -c /additions.yml --apply-iptables --restart
+/var/opt/scripts/traefik-netbird-config/add-config.sh && (cd /var/opt/services/traefik && docker compose down && docker compose up -d) && sleep 5 && /var/opt/scripts/traefik-netbird-config/test-endpoints.sh
