@@ -6,9 +6,12 @@ LABEL description="Traefik Config Manager - Type-safe CLI for managing Traefik c
 WORKDIR /app
 
 # Install Docker CLI for container management (--restart flag needs this)
+# Install iptables and netfilter-persistent for firewall rule management
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	ca-certificates \
 	curl \
+	iptables \
+	netfilter-persistent \
 	&& install -m 0755 -d /etc/apt/keyrings \
 	&& curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
 	&& chmod a+r /etc/apt/keyrings/docker.asc \
