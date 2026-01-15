@@ -1,0 +1,29 @@
+{
+  "python.languageServer": "Pylance",
+  "python.analysis.typeCheckingMode": "basic",
+  "python.analysis.diagnosticMode": "workspace",
+  "python.linting.enabled": true,
+  "python.linting.mypyEnabled": true,
+  "python.linting.mypyArgs": ["--config-file", "mypy.ini"],
+  "editor.formatOnSave": true,
+  "workbench.colorCustomizations": {
+    "activityBar.activeBackground": "#77e8c5",
+    "activityBar.background": "#77e8c5",
+    "activityBar.foreground": "#15202b",
+    "activityBar.inactiveForeground": "#15202b99",
+    "activityBarBadge.background": "#b95be3",
+    "activityBarBadge.foreground": "#15202b",
+    "commandCenter.border": "#15202b99",
+    "sash.hoverBorder": "#77e8c5",
+    "statusBar.background": "#4ce0b3",
+    "statusBar.foreground": "#15202b",
+    "statusBarItem.hoverBackground": "#25d49f",
+    "statusBarItem.remoteBackground": "#4ce0b3",
+    "statusBarItem.remoteForeground": "#15202b",
+    "titleBar.activeBackground": "#4ce0b3",
+    "titleBar.activeForeground": "#15202b",
+    "titleBar.inactiveBackground": "#4ce0b399",
+    "titleBar.inactiveForeground": "#15202b99"
+  },
+  "peacock.color": "#4CE0B3"
+}
