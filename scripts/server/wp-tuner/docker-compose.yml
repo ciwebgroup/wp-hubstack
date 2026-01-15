@@ -1,0 +1,15 @@
+services:
+  wp-tuner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wp-container-tuner:latest
+    container_name: wp-tuner
+    volumes:
+      # Mount Docker socket for container introspection
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Mount sites directory
+      - /var/opt/sites:/var/opt/sites
+    network_mode: host
+    # Override to run specific commands
+    # command: ["wp_malibuheatingandair", "--site-path", "/var/opt/sites/malibuheatingandair.com"]
