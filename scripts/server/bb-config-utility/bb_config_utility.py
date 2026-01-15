@@ -45,11 +45,18 @@ def get_compose_workdir_from_inspect(container_name: str) -> Optional[str]:
     # Common label used in this environment
     key = "com.docker.compose.project.working_dir"
     if key in labels:
-        return labels[key]
+        workdir = labels[key]
+        # If the label points to a file (ends with .yml or .yaml), get parent directory
+        if workdir.endswith(('.yml', '.yaml')):
+            workdir = str(Path(workdir).parent)
+        return workdir
     # fallback: try project directory label
     for candidate in ["com.docker.compose.project.working_dir", "com.docker.compose.project.working_dir"]:
         if candidate in labels:
-            return labels[candidate]
+            workdir = labels[candidate]
+            if workdir.endswith(('.yml', '.yaml')):
+                workdir = str(Path(workdir).parent)
+            return workdir
     return None
 
 
@@ -77,6 +84,64 @@ def write_yaml_file(path: Path, data: Dict, dry_run: bool):
         print(f"Writing {path}")
         with open(path, "w", encoding="utf-8") as fh:
             yaml.safe_dump(data, fh, sort_keys=False)
+
+
+def patch_traefik_compose_yaml(compose_path: Path, dynamic_dir: Path, dry_run: bool, rollback: bool = False):
+    if not compose_path.exists():
+        print(f"Skipping Traefik compose update: {compose_path} not found")
+        return
+
+    if rollback and not dry_run:
+        backup_compose_file(compose_path)
+
+    with open(compose_path, "r", encoding="utf-8") as fh:
+        orig = yaml.safe_load(fh)
+    if not orig:
+        raise RuntimeError(f"Empty or invalid compose at {compose_path}")
+
+    services = orig.get("services") or {}
+    traefik_service = services.get("traefik")
+    if not traefik_service:
+        raise RuntimeError(f"Could not find 'traefik' service in {compose_path}")
+
+    # Ensure file provider watch is enabled
+    commands = traefik_service.setdefault("command", [])
+    if isinstance(commands, str):
+        commands = [commands]
+    else:
+        commands = list(commands)
+
+    file_directory_flag = "--providers.file.directory=/dynamic"
+    file_watch_flag = "--providers.file.watch=true"
+    if file_directory_flag not in commands:
+        commands.append(file_directory_flag)
+    if file_watch_flag not in commands:
+        commands.append(file_watch_flag)
+
+    traefik_service["command"] = commands
+
+    # Ensure dynamic dir is mounted
+    volumes = traefik_service.setdefault("volumes", [])
+    if isinstance(volumes, dict):
+        volume_list = [f"{k}:{v}" for k, v in volumes.items()]
+    else:
+        volume_list = list(volumes)
+
+    dynamic_volume = f"{dynamic_dir}:/dynamic"
+    if dynamic_volume not in volume_list:
+        volume_list.append(dynamic_volume)
+
+    traefik_service["volumes"] = volume_list
+
+    if dry_run:
+        print(
+            f"[dry-run] Would update Traefik compose {compose_path} -> service traefik:\n"
+            f"{yaml.safe_dump(traefik_service, width=float('inf'))}"
+        )
+    else:
+        print(f"Updating Traefik compose file: {compose_path}")
+        with open(compose_path, "w", encoding="utf-8") as fh:
+            yaml.safe_dump(orig, fh, sort_keys=False, width=float('inf'))
 
 
 def backup_compose_file(compose_path: Path) -> Path:
@@ -174,11 +239,11 @@ def patch_compose_yaml(compose_path: Path, service_container_name: str, site_nam
         orig["services"][target_service_key]["labels"] = new_labels
 
     if dry_run:
-        print(f"[dry-run] Would update {compose_path} -> service {target_service_key} labels:\n{yaml.safe_dump(orig['services'][target_service_key])}")
+        print(f"[dry-run] Would update {compose_path} -> service {target_service_key} labels:\n{yaml.safe_dump(orig['services'][target_service_key], width=float('inf'))}")
     else:
         print(f"Updating compose file: {compose_path}")
         with open(compose_path, "w", encoding="utf-8") as fh:
-            yaml.safe_dump(orig, fh, sort_keys=False)
+            yaml.safe_dump(orig, fh, sort_keys=False, width=float('inf'))
 
 
 def main():
@@ -197,7 +262,12 @@ def main():
     rollback = args.rollback
 
     if args.traefik_config:
-        traefik_workdir = Path(args.traefik_config).resolve()
+        traefik_path = Path(args.traefik_config).resolve()
+        # If the path points to a file (ends with .yml or .yaml), get parent directory
+        if traefik_path.is_file() or traefik_path.name.endswith(('.yml', '.yaml')):
+            traefik_workdir = traefik_path.parent
+        else:
+            traefik_workdir = traefik_path
     else:
         if not args.traefik_container:
             print("Either --traefik-container or --traefik-config must be provided", file=sys.stderr)
@@ -211,6 +281,13 @@ def main():
     print(f"Traefik working dir: {traefik_workdir}")
     dynamic_dir = traefik_workdir / "dynamic"
     ensure_dir(dynamic_dir, dry_run)
+
+    # Ensure Traefik is configured to watch the dynamic directory
+    traefik_compose = traefik_workdir / "docker-compose.yml"
+    try:
+        patch_traefik_compose_yaml(traefik_compose, dynamic_dir, dry_run, rollback)
+    except Exception as exc:
+        print(f"Failed to patch Traefik compose at {traefik_compose}: {exc}")
 
     if args.site_containers:
         sites = [s.strip() for s in args.site_containers.split(",") if s.strip()]
