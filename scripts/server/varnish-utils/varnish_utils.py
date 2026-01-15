@@ -26,6 +26,33 @@ except Exception:
     print("Missing dependency 'requests'. Install with pip install requests", file=sys.stderr)
     raise
 
+import os
+import shutil
+from datetime import datetime
+
+# YAML helpers: prefer ruamel.yaml for round-trip, fall back to PyYAML
+try:
+    from ruamel.yaml import YAML
+    _yaml = YAML()
+    def load_yaml(path):
+        with open(path, 'r') as fh:
+            return _yaml.load(fh) or {}
+    def dump_yaml(data, path):
+        with open(path, 'w') as fh:
+            _yaml.dump(data, fh)
+except Exception:
+    try:
+        import yaml
+    except Exception:
+        print("Missing dependency 'ruamel.yaml' or 'PyYAML'. Install with pip install ruamel.yaml or pip install pyyaml", file=sys.stderr)
+        raise
+    def load_yaml(path):
+        with open(path, 'r') as fh:
+            return yaml.safe_load(fh) or {}
+    def dump_yaml(data, path):
+        with open(path, 'w') as fh:
+            yaml.safe_dump(data, fh, default_flow_style=False)
+
 
 def run(cmd: str, check: bool = True) -> subprocess.CompletedProcess:
     print(f"+ {cmd}")
@@ -207,8 +234,82 @@ def action_clear(sites: List[str], action: str, url_path: str, pattern: str, dry
             run(cmd)
 
 
+def action_deploy(dc_config_path: str, target_dc_config_path: str, dry_run: bool, assume_yes: bool):
+    print("\n== Deploy Varnish service into Docker Compose ==")
+    if not os.path.isfile(dc_config_path):
+        print(f"dc-config file not found: {dc_config_path}", file=sys.stderr)
+        return
+    if not os.path.isfile(target_dc_config_path):
+        print(f"target file not found: {target_dc_config_path}", file=sys.stderr)
+        return
+    try:
+        services_src = load_yaml(dc_config_path) or {}
+    except Exception as e:
+        print(f"Failed to load dc-config: {e}", file=sys.stderr)
+        return
+    if 'services' in services_src and isinstance(services_src['services'], dict):
+        services = services_src['services'] or {}
+    else:
+        # if the file is a single service mapping, use it directly (allow either style)
+        services = services_src or {}
+        # remove top-level version key if present
+        services = {k: v for k, v in services.items() if k != 'version'}
+    if not services:
+        print("No services found in dc-config", file=sys.stderr)
+        return
+    try:
+        target = load_yaml(target_dc_config_path) or {}
+    except Exception as e:
+        print(f"Failed to load target dc-config: {e}", file=sys.stderr)
+        return
+    target_services = target.get('services', {}) or {}
+    collisions = [name for name in services if name in target_services]
+    if collisions and not assume_yes:
+        print(f"Service(s) {', '.join(collisions)} already exist in target: {target_dc_config_path}")
+        ok = input("Overwrite them? [y/N] ")
+        if not ok.lower().startswith('y'):
+            print("Aborted")
+            return
+    # Backup
+    ts = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+    backup_path = f"{target_dc_config_path}.bak.{ts}"
+    try:
+        shutil.copy2(target_dc_config_path, backup_path)
+    except Exception as e:
+        print(f"Failed to create backup: {e}", file=sys.stderr)
+        return
+    print(f"Backed up {target_dc_config_path} -> {backup_path}")
+    # Merge
+    merged_services = dict(target_services)
+    merged_services.update(services)
+    target['services'] = merged_services
+    if dry_run:
+        print("DRY RUN: would write merged services into target (not writing file).")
+        return
+    try:
+        dump_yaml(target, target_dc_config_path)
+    except Exception as e:
+        print(f"Error writing target file: {e}", file=sys.stderr)
+        shutil.copy2(backup_path, target_dc_config_path)
+        raise
+    # Validate docker compose
+    cwd = os.path.dirname(os.path.abspath(target_dc_config_path)) or '.'
+    cmd = f"docker compose -f {shlex.quote(target_dc_config_path)} config -q"
+    print(f"+ {cmd}")
+    cp = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=cwd)
+    if cp.returncode != 0:
+        print("docker compose config failed, rolling back", file=sys.stderr)
+        print(cp.stdout + cp.stderr, file=sys.stderr)
+        try:
+            shutil.copy2(backup_path, target_dc_config_path)
+        except Exception as e:
+            print(f"Failed to restore backup: {e}", file=sys.stderr)
+        raise SystemExit(cp.returncode)
+    print("Deploy successful; docker compose config validated.")
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Varnish utils: test and clear cache')
+    parser = argparse.ArgumentParser(description='Varnish utils: test, clear cache, and deploy varnish service')
     sub = parser.add_subparsers(dest='cmd', required=True)
 
     # test
@@ -224,6 +325,13 @@ def main():
     p_clear.add_argument('--dry-run', action='store_true', help='Print actions only')
     p_clear.add_argument('--yes', action='store_true', help='Assume yes for destructive operations')
 
+    # deploy
+    p_deploy = sub.add_parser('deploy', help='Insert a Varnish service into a Docker Compose YAML file')
+    p_deploy.add_argument('--dc-config', required=True, help='YAML file containing the Varnish service (single service or services mapping)')
+    p_deploy.add_argument('--target-dc-config', required=True, help='Target Docker Compose YAML file to modify')
+    p_deploy.add_argument('--dry-run', action='store_true', help='Show what would change, do not write')
+    p_deploy.add_argument('--yes', action='store_true', help='Assume yes for destructive operations')
+
     args = parser.parse_args()
 
     if args.cmd == 'test':
@@ -232,6 +340,8 @@ def main():
     elif args.cmd == 'clear':
         sites = parse_sites_arg(args.sites)
         action_clear(sites, args.action, args.url_path, args.pattern, args.dry_run, args.yes)
+    elif args.cmd == 'deploy':
+        action_deploy(args.dc_config, args.target_dc_config, args.dry_run, args.yes)
 
 
 if __name__ == '__main__':
