@@ -7,9 +7,14 @@
 # The TRAEFIK_DIR env var specifies the HOST path to mount into the container at /traefik
 
 services:
-  traefik-config:
+  traefik-netbird-config:
     build: .
     container_name: traefik-config-manager
+    # Use host network for iptables to affect host firewall
+    network_mode: host
+    # Grant NET_ADMIN capability for iptables modifications
+    cap_add:
+      - NET_ADMIN
     volumes:
       # Mount Docker socket for container management (needed for rollback restarts)
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -19,4 +24,4 @@ services:
       - ./dynamic:/dynamic
     working_dir: /traefik
     # Default command shows help - override with 'add', 'rollback', etc.
-    command: [ "--help" ]
+    command: ["--help"]
