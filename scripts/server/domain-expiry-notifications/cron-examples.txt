@@ -1,0 +1,14 @@
+# Sample cron jobs for domain expiry notifications
+# Add these to your system crontab with: crontab -e
+
+# Daily check at 7:00 AM - check domains expiring within 30 days
+0 7 * * * cd /var/www/ciwebgroup/wp-hubstack/scripts/server/domain-expiry-notifications && ./run.sh >> /var/log/domain-expiry-check.log 2>&1
+
+# Weekly check on Monday at 9:00 AM - more verbose, check 60-day threshold
+0 9 * * 1 cd /var/www/ciwebgroup/wp-hubstack/scripts/server/domain-expiry-notifications && ./run.sh --days 60 -v >> /var/log/domain-expiry-check-weekly.log 2>&1
+
+# Critical check twice daily - only domains expiring within 7 days
+0 8,20 * * * cd /var/www/ciwebgroup/wp-hubstack/scripts/server/domain-expiry-notifications && ./run.sh --days 7 >> /var/log/domain-expiry-critical.log 2>&1
+
+# Monthly full report with JSON output
+0 10 1 * * cd /var/www/ciwebgroup/wp-hubstack/scripts/server/domain-expiry-notifications && ./run.sh --json > /var/log/domain-expiry-report-$(date +\%Y\%m).json 2>&1

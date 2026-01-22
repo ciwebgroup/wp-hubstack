@@ -1,0 +1,18 @@
+services:
+  domain-expiry-checker:
+    build: .
+    image: ciweb/domain-expiry-checker:latest
+    container_name: domain-expiry-checker
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./:/app:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /usr/bin/docker:/usr/bin/docker:ro
+    working_dir: /app
+    # ENTRYPOINT in Dockerfile handles "python3 main.py"
+    # Just pass arguments here:
+    # command: ["--days", "60"]
+    # command: ["--container", "wp_example_com"]
+    # command: ["--output", "/app/results.json"]
