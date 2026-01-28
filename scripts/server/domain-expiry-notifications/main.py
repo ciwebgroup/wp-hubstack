@@ -10,6 +10,8 @@ import csv
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 import logging
+import urllib.request
+import urllib.error
 
 # Python whois library
 try:
@@ -27,10 +29,39 @@ logging.basicConfig(
 
 
 class DomainExpiryChecker:
-    def __init__(self, days_threshold: int = 30, dry_run: bool = False, verbose: bool = False):
+    DEFAULT_WHOIS_TIMEOUT = 30
+    DEFAULT_WHOIS_RETRIES = 2
+    DEFAULT_RDAP_TIMEOUT = 15
+
+    WHOIS_SERVERS_BY_TLD = {
+        'com': ['whois.verisign-grs.com', 'whois.crsnic.net'],
+        'net': ['whois.verisign-grs.com', 'whois.crsnic.net'],
+        'org': ['whois.pir.org'],
+        'io': ['whois.nic.io'],
+        'co': ['whois.nic.co'],
+        'us': ['whois.nic.us'],
+        'info': ['whois.afilias.net'],
+    }
+
+    RDAP_ENDPOINTS_BY_TLD = {
+        'com': ['https://rdap.verisign.com/com/v1/domain/'],
+        'net': ['https://rdap.verisign.com/net/v1/domain/'],
+        'org': ['https://rdap.publicinterestregistry.org/rdap/org/domain/'],
+    }
+
+    RDAP_FALLBACK_ENDPOINTS = [
+        'https://rdap.org/domain/',
+    ]
+
+    def __init__(self, days_threshold: int = 30, dry_run: bool = False, verbose: bool = False,
+                 whois_timeout: int = DEFAULT_WHOIS_TIMEOUT, whois_retries: int = DEFAULT_WHOIS_RETRIES,
+                 rdap_timeout: int = DEFAULT_RDAP_TIMEOUT):
         self.days_threshold = days_threshold
         self.dry_run = dry_run
         self.verbose = verbose
+        self.whois_timeout = whois_timeout
+        self.whois_retries = whois_retries
+        self.rdap_timeout = rdap_timeout
         if self.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
@@ -83,6 +114,39 @@ class DomainExpiryChecker:
             domain = domain[4:]
         return domain
 
+    def _get_tld(self, domain: str) -> str:
+        parts = domain.lower().strip('.').split('.')
+        return parts[-1] if parts else ''
+
+    def _get_whois_servers(self, domain: str) -> List[Optional[str]]:
+        tld = self._get_tld(domain)
+        servers = self.WHOIS_SERVERS_BY_TLD.get(tld, [])
+        return servers + [None]
+
+    def _get_rdap_endpoints(self, domain: str) -> List[str]:
+        tld = self._get_tld(domain)
+        endpoints = self.RDAP_ENDPOINTS_BY_TLD.get(tld, [])
+        return endpoints + self.RDAP_FALLBACK_ENDPOINTS
+
+    def _normalize_datetime(self, dt: datetime) -> datetime:
+        if dt.tzinfo is not None:
+            return dt.replace(tzinfo=None)
+        return dt
+
+    def _parse_rdap_expiry(self, data: Dict) -> Optional[datetime]:
+        events = data.get('events', []) if isinstance(data, dict) else []
+        for event in events:
+            action = (event.get('eventAction') or '').lower()
+            if action in {'expiration', 'expiry', 'expires'}:
+                date_str = event.get('eventDate')
+                if not date_str:
+                    continue
+                try:
+                    return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                except ValueError:
+                    continue
+        return None
+
     def check_expiry_with_python_whois(self, domain: str) -> Optional[Tuple[datetime, int]]:
         """Check domain expiry using python-whois library"""
         if not WHOIS_AVAILABLE:
@@ -106,6 +170,7 @@ class DomainExpiryChecker:
                 self.log(f"Invalid expiry date format for {domain}: {expiry_date}", logging.WARNING)
                 return None
             
+            expiry_date = self._normalize_datetime(expiry_date)
             days_until_expiry = (expiry_date - datetime.now()).days
             return (expiry_date, days_until_expiry)
             
@@ -114,65 +179,102 @@ class DomainExpiryChecker:
             return None
 
     def check_expiry_with_system_whois(self, domain: str) -> Optional[Tuple[datetime, int]]:
-        """Check domain expiry using system whois command"""
-        try:
-            self.log(f"Querying WHOIS for {domain} using system whois...", logging.DEBUG)
-            result = subprocess.run(['whois', domain], 
-                                    capture_output=True, text=True, timeout=30)
-            
-            if result.returncode != 0:
-                self.log(f"WHOIS command failed for {domain}", logging.WARNING)
-                return None
-            
-            output = result.stdout.lower()
-            
-            # Common patterns for expiry dates in WHOIS output
-            expiry_patterns = [
-                r'expiry date:\s*(\d{4}-\d{2}-\d{2})',
-                r'expiration date:\s*(\d{4}-\d{2}-\d{2})',
-                r'expire date:\s*(\d{4}-\d{2}-\d{2})',
-                r'registry expiry date:\s*(\d{4}-\d{2}-\d{2})',
-                r'expiration time:\s*(\d{4}-\d{2}-\d{2})',
-                r'paid-till:\s*(\d{4}-\d{2}-\d{2})',
-                # ISO format with time
-                r'expiry date:\s*(\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2})',
-                r'expiration date:\s*(\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2})',
-                # US format
-                r'expiration date:\s*(\d{2}/\d{2}/\d{4})',
-                r'expiry date:\s*(\d{2}/\d{2}/\d{4})',
-            ]
-            
-            for pattern in expiry_patterns:
-                match = re.search(pattern, output)
-                if match:
-                    date_str = match.group(1)
-                    try:
-                        # Try different date formats
-                        if 't' in date_str:
-                            # ISO format with time
-                            expiry_date = datetime.fromisoformat(date_str.replace('z', ''))
-                        elif '/' in date_str:
-                            # US format MM/DD/YYYY
-                            expiry_date = datetime.strptime(date_str, '%m/%d/%Y')
-                        else:
-                            # ISO format date only
-                            expiry_date = datetime.strptime(date_str, '%Y-%m-%d')
-                        
-                        days_until_expiry = (expiry_date - datetime.now()).days
-                        return (expiry_date, days_until_expiry)
-                    except ValueError as e:
-                        self.log(f"Could not parse date '{date_str}' for {domain}: {e}", logging.DEBUG)
+        """Check domain expiry using system whois command with fallbacks and retries"""
+        servers = self._get_whois_servers(domain)
+        expiry_patterns = [
+            r'expiry date:\s*(\d{4}-\d{2}-\d{2})',
+            r'expiration date:\s*(\d{4}-\d{2}-\d{2})',
+            r'expire date:\s*(\d{4}-\d{2}-\d{2})',
+            r'registry expiry date:\s*(\d{4}-\d{2}-\d{2})',
+            r'expiration time:\s*(\d{4}-\d{2}-\d{2})',
+            r'paid-till:\s*(\d{4}-\d{2}-\d{2})',
+            r'expiry date:\s*(\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2})',
+            r'expiration date:\s*(\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2})',
+            r'expiration date:\s*(\d{2}/\d{2}/\d{4})',
+            r'expiry date:\s*(\d{2}/\d{2}/\d{4})',
+        ]
+
+        forbidden_patterns = [
+            r'access denied',
+            r'query rate limit',
+            r'quota exceeded',
+            r'forbidden',
+            r'not permitted',
+        ]
+
+        for server in servers:
+            server_desc = server or 'default whois server'
+            for attempt in range(1, self.whois_retries + 1):
+                try:
+                    self.log(
+                        f"Querying WHOIS for {domain} using system whois ({server_desc}), attempt {attempt}/{self.whois_retries}...",
+                        logging.DEBUG
+                    )
+                    cmd = ['whois', domain] if not server else ['whois', '-h', server, domain]
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=self.whois_timeout)
+
+                    if result.returncode != 0:
+                        self.log(f"WHOIS command failed for {domain} via {server_desc}", logging.WARNING)
                         continue
-            
-            self.log(f"Could not find expiry date in WHOIS output for {domain}", logging.WARNING)
-            return None
-            
-        except subprocess.TimeoutExpired:
-            self.log(f"WHOIS query timed out for {domain}", logging.WARNING)
-            return None
-        except Exception as e:
-            self.log(f"Error running system whois for {domain}: {e}", logging.WARNING)
-            return None
+
+                    output = result.stdout.lower()
+
+                    if any(re.search(pat, output) for pat in forbidden_patterns):
+                        self.log(f"WHOIS access/rate-limit issue for {domain} via {server_desc}", logging.WARNING)
+                        continue
+
+                    for pattern in expiry_patterns:
+                        match = re.search(pattern, output)
+                        if match:
+                            date_str = match.group(1)
+                            try:
+                                if 't' in date_str:
+                                    expiry_date = datetime.fromisoformat(date_str.replace('z', '+00:00'))
+                                elif '/' in date_str:
+                                    expiry_date = datetime.strptime(date_str, '%m/%d/%Y')
+                                else:
+                                    expiry_date = datetime.strptime(date_str, '%Y-%m-%d')
+
+                                expiry_date = self._normalize_datetime(expiry_date)
+                                days_until_expiry = (expiry_date - datetime.now()).days
+                                return (expiry_date, days_until_expiry)
+                            except ValueError as e:
+                                self.log(f"Could not parse date '{date_str}' for {domain}: {e}", logging.DEBUG)
+                                continue
+
+                    self.log(f"Could not find expiry date in WHOIS output for {domain} via {server_desc}", logging.WARNING)
+                except subprocess.TimeoutExpired:
+                    self.log(f"WHOIS query timed out for {domain} via {server_desc} (attempt {attempt})", logging.WARNING)
+                except Exception as e:
+                    self.log(f"Error running system whois for {domain} via {server_desc}: {e}", logging.WARNING)
+
+        return None
+
+    def check_expiry_with_rdap(self, domain: str) -> Optional[Tuple[datetime, int]]:
+        """Check domain expiry using RDAP HTTP endpoints"""
+        for endpoint in self._get_rdap_endpoints(domain):
+            url = f"{endpoint}{domain}"
+            try:
+                self.log(f"Querying RDAP for {domain}: {url}", logging.DEBUG)
+                with urllib.request.urlopen(url, timeout=self.rdap_timeout) as resp:
+                    if resp.status != 200:
+                        self.log(f"RDAP request failed for {domain} with status {resp.status}", logging.WARNING)
+                        continue
+                    data = json.loads(resp.read().decode('utf-8'))
+                    expiry_date = self._parse_rdap_expiry(data)
+                    if not expiry_date:
+                        self.log(f"No RDAP expiry date found for {domain} from {url}", logging.DEBUG)
+                        continue
+                    expiry_date = self._normalize_datetime(expiry_date)
+                    days_until_expiry = (expiry_date - datetime.now()).days
+                    return (expiry_date, days_until_expiry)
+            except urllib.error.HTTPError as e:
+                self.log(f"RDAP HTTP error for {domain} via {url}: {e}", logging.WARNING)
+            except urllib.error.URLError as e:
+                self.log(f"RDAP URL error for {domain} via {url}: {e}", logging.WARNING)
+            except Exception as e:
+                self.log(f"RDAP error for {domain} via {url}: {e}", logging.WARNING)
+        return None
 
     def check_domain_expiry(self, domain: str) -> Optional[Tuple[datetime, int]]:
         """Check domain expiry using available methods"""
@@ -183,7 +285,12 @@ class DomainExpiryChecker:
                 return result
         
         # Fallback to system whois
-        return self.check_expiry_with_system_whois(domain)
+        result = self.check_expiry_with_system_whois(domain)
+        if result:
+            return result
+
+        # Final fallback to RDAP
+        return self.check_expiry_with_rdap(domain)
 
     def format_expiry_status(self, domain: str, expiry_date: datetime, days_until_expiry: int) -> str:
         """Format expiry status message"""
@@ -488,13 +595,22 @@ Examples:
                         help='Output file path (format auto-detected: .json, .csv, or .txt)')
     parser.add_argument('--json', action='store_true',
                         help='Output results as JSON to stdout (legacy, use --output instead)')
+    parser.add_argument('--whois-timeout', type=int, default=DomainExpiryChecker.DEFAULT_WHOIS_TIMEOUT,
+                        help='WHOIS command timeout in seconds (default: 30)')
+    parser.add_argument('--whois-retries', type=int, default=DomainExpiryChecker.DEFAULT_WHOIS_RETRIES,
+                        help='WHOIS retry attempts per server (default: 2)')
+    parser.add_argument('--rdap-timeout', type=int, default=DomainExpiryChecker.DEFAULT_RDAP_TIMEOUT,
+                        help='RDAP HTTP timeout in seconds (default: 15)')
     
     args = parser.parse_args()
     
     checker = DomainExpiryChecker(
         days_threshold=args.days,
         dry_run=args.dry_run,
-        verbose=args.verbose
+        verbose=args.verbose,
+        whois_timeout=args.whois_timeout,
+        whois_retries=args.whois_retries,
+        rdap_timeout=args.rdap_timeout
     )
     
     results = checker.check_all_domains(specific_container=args.container)
