@@ -1,0 +1,4 @@
+docker==7.0.0
+psutil==5.9.8
+types-psutil==5.9.5.20240205
+types-requests==2.31.0.20240125
