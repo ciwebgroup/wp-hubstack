@@ -218,9 +218,30 @@ def get_compose_file_from_container(container: Container) -> typing.Optional[str
         container.reload()
         labels = container.attrs.get('Config', {}).get('Labels', {})
         compose_files = labels.get('com.docker.compose.project.config_files', '')
+        
         if compose_files:
             # Can be comma-separated list; take the first one
-            return compose_files.split(',')[0].strip()
+            extracted_path = compose_files.split(',')[0].strip()
+            logger.debug(f"Extracted compose path from labels: {extracted_path}")
+            
+            # Check if file exists at extracted path
+            if Path(extracted_path).exists():
+                return extracted_path
+            
+            # Try variations if exact path doesn't exist
+            compose_dir = Path(extracted_path).parent
+            if compose_dir.exists():
+                # Try common compose file names in the directory
+                for filename in ['docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']:
+                    candidate = compose_dir / filename
+                    if candidate.exists():
+                        logger.info(f"Found compose file at {candidate} (label pointed to {extracted_path})")
+                        return str(candidate)
+            
+            # Path from label doesn't exist and we couldn't find alternatives
+            logger.warning(f"Compose file from label ({extracted_path}) does not exist and no alternatives found")
+            return extracted_path  # Return it anyway so the caller can log the error
+        
         return None
     except Exception as e:
         logger.error(f"Error getting compose file for {container.name}: {e}")
@@ -240,6 +261,8 @@ def check_and_update_htaccess_volume(container: Container, config: Config) -> No
     if not compose_path:
         logger.warning(f"Could not find docker-compose.yml for {container.name}. Skipping.")
         return
+    
+    logger.info(f"Compose path from container: {compose_path}")
     
     if not Path(compose_path).exists():
         logger.error(f"Compose file does not exist: {compose_path}. Skipping.")
@@ -325,102 +348,14 @@ def check_and_update_htaccess_volume(container: Container, config: Config) -> No
         with open(compose_path, 'w') as f:
             yaml.dump(compose_data, f, default_flow_style=False, sort_keys=False)
         logger.info(f"Updated {compose_path} with htaccess volume")
+        logger.info(f"MANUAL ACTION REQUIRED: Run 'docker compose up -d {service_name}' in {Path(compose_path).parent} to apply changes")
     except Exception as e:
         logger.error(f"Failed to write updated compose file: {e}")
         return
     
-    # Restart container via docker-compose
-    compose_dir = Path(compose_path).parent
-    logger.info(f"Restarting container via docker-compose in {compose_dir}...")
-    
-    try:
-        # Try docker compose (v2) first
-        result = subprocess.run(
-            ['docker', 'compose', 'up', '-d', service_name],
-            cwd=str(compose_dir),
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
-        if result.returncode != 0:
-            # Fallback to docker-compose (v1)
-            result = subprocess.run(
-                ['docker-compose', 'up', '-d', service_name],
-                cwd=str(compose_dir),
-                capture_output=True,
-                text=True,
-                timeout=60
-            )
-        
-        if result.returncode != 0:
-            logger.error(f"Failed to restart container: {result.stderr}")
-            if backup_created:
-                logger.info("Rolling back compose file...")
-                try:
-                    with open(backup_path, 'r') as f:
-                        original = f.read()
-                    with open(compose_path, 'w') as f:
-                        f.write(original)
-                    logger.info("Rollback successful.")
-                except Exception as rb_err:
-                    logger.critical(f"Rollback FAILED: {rb_err}. Manual intervention required!")
-            return
-        
-        logger.info(f"Container restarted successfully")
-    except subprocess.TimeoutExpired:
-        logger.error("Timeout while restarting container")
-        return
-    except Exception as e:
-        logger.error(f"Error restarting container: {e}")
-        return
-    
-    # Health check
-    if not config.skip_health_check:
-        # Wait a moment for container to be ready
-        import time
-        time.sleep(2)
-        
-        # Reload container to get fresh data
-        try:
-            container.reload()
-        except Exception as e:
-            logger.warning(f"Could not reload container: {e}")
-        
-        url = get_public_url(container)
-        if not url:
-            logger.warning(f"Could not determine URL for {container.name}. Cannot verify health.")
-            return
-        
-        logger.info(f"Verifying health at {url}...")
-        is_healthy = verify_site_health(url)
-        
-        if not is_healthy:
-            logger.error(f"Health check FAILED for {container.name}.")
-            if backup_created:
-                logger.info("Rolling back compose file...")
-                try:
-                    with open(backup_path, 'r') as f:
-                        original = f.read()
-                    with open(compose_path, 'w') as f:
-                        f.write(original)
-                    logger.info("Rollback successful. Restarting with original config...")
-                    
-                    # Restart with original config
-                    subprocess.run(
-                        ['docker', 'compose', 'up', '-d', service_name],
-                        cwd=str(compose_dir),
-                        capture_output=True,
-                        timeout=60
-                    )
-                    logger.info("Container restored to previous state.")
-                except Exception as rb_err:
-                    logger.critical(f"Rollback FAILED: {rb_err}. Manual intervention required!")
-            else:
-                logger.critical("Health check failed but no backup was created (--no-backup). Manual intervention required!")
-        else:
-            logger.info(f"Health check passed for {container.name}.")
-    else:
-        logger.info("Skipping health check (--skip-health-check enabled).")
+    # Note: We skip automatic container restart because docker CLI is not available in this container
+    # The user needs to manually restart containers after running this tool
+    logger.info(f"Compose file updated successfully for {container.name}. Container restart required to apply volume mount.")
 
 def process_container(container: Container, config: Config) -> None:
     logger.info(f"Processing container: {container.name}")
@@ -629,8 +564,11 @@ def main() -> None:
     if config.local_htaccess_path:
         logger.info(f"Writing to local .htaccess at {config.local_htaccess_path}")
         write_local_htaccess(config.local_htaccess_path, config.dry_run, config.backup, config.skip_health_check, client)
-        logger.info("Local .htaccess write complete. Skipping container .htaccess processing.")
-        return
+        logger.info("Local .htaccess write complete.")
+        # Only return early if no other operations are requested
+        if not config.check_htaccess_volume:
+            logger.info("Skipping container .htaccess processing.")
+            return
 
     targets = get_target_containers(client, config)
 
@@ -648,8 +586,10 @@ def main() -> None:
         logger.info("htaccess volume check complete.")
         return
 
-    for container in targets:
-        process_container(container, config)
+    # Process container .htaccess files (only if --htaccess was not used)
+    if not config.local_htaccess_path:
+        for container in targets:
+            process_container(container, config)
 
 if __name__ == "__main__":
     main()
