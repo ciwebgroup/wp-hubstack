@@ -1,11 +1,14 @@
 import argparse
 import io
+import json
 import logging
+import subprocess
 import sys
 import tarfile
 import time
 import typing
 from dataclasses import dataclass
+from pathlib import Path
 
 import docker
 import requests
@@ -24,9 +27,10 @@ logger = logging.getLogger(__name__)
 HTACCESS_PATH = "/var/www/html/.htaccess"
 BACKUP_SUFFIX = ".backup"
 
-# The rules extracted from the PHP plugin
+# Block access to log files in WordPress directories
 BLOCK_RULES = """
-# BEGIN Block Debug Log
+# BEGIN Block Log Files
+# Block debug.log
 <Files "debug.log">
     <IfModule mod_authz_core.c>
         Require all denied
@@ -36,7 +40,40 @@ BLOCK_RULES = """
         Deny from all
     </IfModule>
 </Files>
-# END Block Debug Log
+
+# Block error_log
+<Files "error_log">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order Allow,Deny
+        Deny from all
+    </IfModule>
+</Files>
+
+# Block php_errorlog
+<Files "php_errorlog">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order Allow,Deny
+        Deny from all
+    </IfModule>
+</Files>
+
+# Block all log files using pattern matching
+<FilesMatch "\.(log|log\.[0-9]+)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order Allow,Deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+# END Block Log Files
 """
 
 @dataclass
@@ -47,6 +84,8 @@ class Config:
     exclude: typing.List[str]
     local_htaccess_path: typing.Optional[str]
     skip_health_check: bool
+    backup: bool
+    check_htaccess_volume: bool
 
 def get_docker_client() -> docker.DockerClient:
     try:
@@ -173,6 +212,216 @@ def verify_site_health(url: str) -> bool:
         logger.error(f"Health check connection error for {url}: {e}")
         return False
 
+def get_compose_file_from_container(container: Container) -> typing.Optional[str]:
+    """Extract docker-compose.yml path from container labels."""
+    try:
+        container.reload()
+        labels = container.attrs.get('Config', {}).get('Labels', {})
+        compose_files = labels.get('com.docker.compose.project.config_files', '')
+        if compose_files:
+            # Can be comma-separated list; take the first one
+            return compose_files.split(',')[0].strip()
+        return None
+    except Exception as e:
+        logger.error(f"Error getting compose file for {container.name}: {e}")
+        return None
+
+def check_and_update_htaccess_volume(container: Container, config: Config) -> None:
+    """Check if htaccess volume mount exists in docker-compose.yml and add if missing."""
+    logger.info(f"Checking htaccess volume for container: {container.name}")
+    
+    if config.dry_run:
+        logger.info(f"[DRY-RUN] Would check volume mount for {container.name}")
+        logger.info(f"[DRY-RUN] Would ensure: /var/opt/shared/.htaccess:/var/www/html/.htaccess:ro")
+        return
+    
+    # Get docker-compose.yml path
+    compose_path = get_compose_file_from_container(container)
+    if not compose_path:
+        logger.warning(f"Could not find docker-compose.yml for {container.name}. Skipping.")
+        return
+    
+    if not Path(compose_path).exists():
+        logger.error(f"Compose file does not exist: {compose_path}. Skipping.")
+        return
+    
+    logger.info(f"Found compose file: {compose_path}")
+    
+    # Import YAML library
+    try:
+        import yaml
+    except ImportError:
+        logger.error("PyYAML not installed. Cannot check docker-compose.yml files.")
+        return
+    
+    # Read compose file
+    try:
+        with open(compose_path, 'r') as f:
+            compose_data = yaml.safe_load(f)
+    except Exception as e:
+        logger.error(f"Failed to parse {compose_path}: {e}")
+        return
+    
+    # Find the service for this container
+    services = compose_data.get('services', {})
+    service_name = None
+    
+    # Try to find service by container_name label or name matching
+    for svc_name, svc_config in services.items():
+        container_name_label = svc_config.get('container_name')
+        if container_name_label == container.name or svc_name == container.name:
+            service_name = svc_name
+            break
+    
+    if not service_name:
+        logger.warning(f"Could not find service definition for {container.name} in {compose_path}")
+        return
+    
+    logger.info(f"Found service: {service_name}")
+    
+    # Check if volume exists
+    service_config = services[service_name]
+    volumes = service_config.get('volumes', [])
+    target_volume = '/var/opt/shared/.htaccess:/var/www/html/.htaccess:ro'
+    
+    volume_exists = any(
+        vol == target_volume or
+        (isinstance(vol, str) and vol.split(':')[1] == '/var/www/html/.htaccess' if ':' in vol else False)
+        for vol in volumes
+    )
+    
+    if volume_exists:
+        logger.info(f"htaccess volume already configured for {container.name}")
+        return
+    
+    logger.info(f"htaccess volume NOT found. Adding to {compose_path}...")
+    
+    # Create backup
+    backup_path = compose_path + BACKUP_SUFFIX
+    backup_created = False
+    
+    if config.backup:
+        try:
+            with open(compose_path, 'r') as f:
+                original_content = f.read()
+            with open(backup_path, 'w') as f:
+                f.write(original_content)
+            logger.info(f"Created backup at {backup_path}")
+            backup_created = True
+        except Exception as e:
+            logger.error(f"Failed to create backup: {e}. Aborting.")
+            return
+    else:
+        logger.info("Backup disabled (--no-backup). Proceeding without backup.")
+    
+    # Add volume
+    if not isinstance(volumes, list):
+        volumes = []
+    volumes.append(target_volume)
+    services[service_name]['volumes'] = volumes
+    
+    # Write updated compose file
+    try:
+        with open(compose_path, 'w') as f:
+            yaml.dump(compose_data, f, default_flow_style=False, sort_keys=False)
+        logger.info(f"Updated {compose_path} with htaccess volume")
+    except Exception as e:
+        logger.error(f"Failed to write updated compose file: {e}")
+        return
+    
+    # Restart container via docker-compose
+    compose_dir = Path(compose_path).parent
+    logger.info(f"Restarting container via docker-compose in {compose_dir}...")
+    
+    try:
+        # Try docker compose (v2) first
+        result = subprocess.run(
+            ['docker', 'compose', 'up', '-d', service_name],
+            cwd=str(compose_dir),
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        if result.returncode != 0:
+            # Fallback to docker-compose (v1)
+            result = subprocess.run(
+                ['docker-compose', 'up', '-d', service_name],
+                cwd=str(compose_dir),
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+        
+        if result.returncode != 0:
+            logger.error(f"Failed to restart container: {result.stderr}")
+            if backup_created:
+                logger.info("Rolling back compose file...")
+                try:
+                    with open(backup_path, 'r') as f:
+                        original = f.read()
+                    with open(compose_path, 'w') as f:
+                        f.write(original)
+                    logger.info("Rollback successful.")
+                except Exception as rb_err:
+                    logger.critical(f"Rollback FAILED: {rb_err}. Manual intervention required!")
+            return
+        
+        logger.info(f"Container restarted successfully")
+    except subprocess.TimeoutExpired:
+        logger.error("Timeout while restarting container")
+        return
+    except Exception as e:
+        logger.error(f"Error restarting container: {e}")
+        return
+    
+    # Health check
+    if not config.skip_health_check:
+        # Wait a moment for container to be ready
+        import time
+        time.sleep(2)
+        
+        # Reload container to get fresh data
+        try:
+            container.reload()
+        except Exception as e:
+            logger.warning(f"Could not reload container: {e}")
+        
+        url = get_public_url(container)
+        if not url:
+            logger.warning(f"Could not determine URL for {container.name}. Cannot verify health.")
+            return
+        
+        logger.info(f"Verifying health at {url}...")
+        is_healthy = verify_site_health(url)
+        
+        if not is_healthy:
+            logger.error(f"Health check FAILED for {container.name}.")
+            if backup_created:
+                logger.info("Rolling back compose file...")
+                try:
+                    with open(backup_path, 'r') as f:
+                        original = f.read()
+                    with open(compose_path, 'w') as f:
+                        f.write(original)
+                    logger.info("Rollback successful. Restarting with original config...")
+                    
+                    # Restart with original config
+                    subprocess.run(
+                        ['docker', 'compose', 'up', '-d', service_name],
+                        cwd=str(compose_dir),
+                        capture_output=True,
+                        timeout=60
+                    )
+                    logger.info("Container restored to previous state.")
+                except Exception as rb_err:
+                    logger.critical(f"Rollback FAILED: {rb_err}. Manual intervention required!")
+            else:
+                logger.critical("Health check failed but no backup was created (--no-backup). Manual intervention required!")
+        else:
+            logger.info(f"Health check passed for {container.name}.")
+    else:
+        logger.info("Skipping health check (--skip-health-check enabled).")
+
 def process_container(container: Container, config: Config) -> None:
     logger.info(f"Processing container: {container.name}")
 
@@ -189,16 +438,21 @@ def process_container(container: Container, config: Config) -> None:
     current_content = current_content_bytes.decode('utf-8', errors='ignore')
 
     # Check if rules already exist
-    rules_already_present = "Block Debug Log" in current_content
+    rules_already_present = "Block Log Files" in current_content
+    backup_created = False
     
     if rules_already_present:
         logger.info(f"Rules already present in {container.name}.")
     else:
-        # 2. Create Backup
-        logger.info(f"Creating backup at {HTACCESS_PATH}{BACKUP_SUFFIX}")
-        if not write_file_to_container(container, HTACCESS_PATH + BACKUP_SUFFIX, current_content_bytes):
-            logger.error("Failed to create backup. Aborting modification.")
-            return
+        # 2. Create Backup (if enabled)
+        if config.backup:
+            logger.info(f"Creating backup at {HTACCESS_PATH}{BACKUP_SUFFIX}")
+            if not write_file_to_container(container, HTACCESS_PATH + BACKUP_SUFFIX, current_content_bytes):
+                logger.error("Failed to create backup. Aborting modification.")
+                return
+            backup_created = True
+        else:
+            logger.info("Backup disabled (--no-backup). Proceeding without backup.")
 
         # 3. Append Rules
         new_content = current_content + "\n" + BLOCK_RULES + "\n"
@@ -225,25 +479,38 @@ def process_container(container: Container, config: Config) -> None:
         logger.error(f"Health check FAILED for {container.name}.")
         if not rules_already_present:
             # Only rollback if we made changes
-            logger.info("Rolling back...")
-            if write_file_to_container(container, HTACCESS_PATH, current_content_bytes):
-                logger.info("Rollback successful.")
+            if backup_created:
+                logger.info("Rolling back...")
+                if write_file_to_container(container, HTACCESS_PATH, current_content_bytes):
+                    logger.info("Rollback successful.")
+                else:
+                    logger.critical("Rollback FAILED. Manual intervention required!")
             else:
-                logger.critical("Rollback FAILED. Manual intervention required!")
+                logger.critical("Health check failed but no backup was created (--no-backup). Manual intervention required!")
         else:
             logger.warning("Rules were already present. No rollback to perform.")
     else:
         logger.info(f"Health check passed for {container.name}.")
 
-def write_local_htaccess(path: str, dry_run: bool) -> None:
-    """Write BLOCK_RULES to a local .htaccess file."""
+def write_local_htaccess(path: str, dry_run: bool, backup: bool, skip_health_check: bool, client: typing.Optional[docker.DockerClient] = None) -> None:
+    """Write BLOCK_RULES to a local .htaccess file with health check against all wp_ containers."""
     if dry_run:
-        logger.info(f"[DRY-RUN] Would write to local {path}")
+        logger.info(f"[DRY-RUN] Would write log-blocking rules to local {path}")
+        if backup:
+            logger.info(f"[DRY-RUN] Would create backup at {path}{BACKUP_SUFFIX}")
+        else:
+            logger.info("[DRY-RUN] Backup would be disabled (--no-backup)")
+        if not skip_health_check:
+            logger.info("[DRY-RUN] Would perform health checks against all wp_ containers")
+            logger.info("[DRY-RUN] Would rollback if any container returns non-200 status")
+        else:
+            logger.info("[DRY-RUN] Health checks would be skipped (--skip-health-check)")
         return
     
     try:
         # Read existing content if file exists
         existing_content = ""
+        backup_path = path + BACKUP_SUFFIX
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 existing_content = f.read()
@@ -251,22 +518,84 @@ def write_local_htaccess(path: str, dry_run: bool) -> None:
             logger.info(f"Creating new .htaccess at {path}")
         
         # Check if rules already exist
-        if "Block Debug Log" in existing_content:
+        if "Block Log Files" in existing_content:
             logger.info(f"Rules already present in {path}. Skipping.")
             return
         
-        # Create backup
-        if existing_content:
-            backup_path = path + BACKUP_SUFFIX
+        # Create backup (if enabled)
+        backup_created = False
+        if backup and existing_content:
             with open(backup_path, 'w', encoding='utf-8') as f:
                 f.write(existing_content)
             logger.info(f"Created backup at {backup_path}")
+            backup_created = True
+        elif not backup:
+            logger.info("Backup disabled (--no-backup). Proceeding without backup.")
         
         # Write new content
         new_content = existing_content + "\n" + BLOCK_RULES + "\n"
         with open(path, 'w', encoding='utf-8') as f:
             f.write(new_content)
         logger.info(f"Successfully wrote to {path}")
+        
+        # Health check against all wp_ containers
+        if not skip_health_check:
+            logger.info("Performing health checks against all wp_ containers...")
+            
+            # Get Docker client if not provided
+            if client is None:
+                try:
+                    client = get_docker_client()
+                except SystemExit:
+                    logger.warning("Cannot connect to Docker for health checks. Skipping health verification.")
+                    return
+            
+            # Get all wp_ containers
+            all_containers = client.containers.list()
+            wp_containers = [c for c in all_containers if c.name.startswith("wp_")]
+            
+            if not wp_containers:
+                logger.info("No wp_ containers found for health check.")
+                return
+            
+            logger.info(f"Found {len(wp_containers)} wp_ containers to verify.")
+            
+            # Check each container's health
+            failed_checks = []
+            for container in wp_containers:
+                url = get_public_url(container)
+                if not url:
+                    logger.warning(f"Could not determine URL for {container.name}. Skipping health check for this container.")
+                    continue
+                
+                logger.info(f"Checking {container.name} at {url}...")
+                is_healthy = verify_site_health(url)
+                
+                if not is_healthy:
+                    failed_checks.append((container.name, url))
+            
+            # Rollback if any checks failed
+            if failed_checks:
+                logger.error(f"Health check FAILED for {len(failed_checks)} container(s):")
+                for name, url in failed_checks:
+                    logger.error(f"  - {name} ({url})")
+                
+                if backup_created:
+                    logger.info(f"Rolling back local .htaccess from {backup_path}...")
+                    try:
+                        with open(backup_path, 'r', encoding='utf-8') as f:
+                            original_content = f.read()
+                        with open(path, 'w', encoding='utf-8') as f:
+                            f.write(original_content)
+                        logger.info("Rollback successful.")
+                    except Exception as rollback_error:
+                        logger.critical(f"Rollback FAILED: {rollback_error}. Manual intervention required!")
+                else:
+                    logger.critical("Health checks failed but no backup was created (--no-backup). Manual intervention required!")
+            else:
+                logger.info("All health checks passed.")
+        else:
+            logger.info("Skipping health checks (--skip-health-check enabled).")
         
     except Exception as e:
         logger.error(f"Failed to write local .htaccess at {path}: {e}")
@@ -279,6 +608,8 @@ def main() -> None:
     parser.add_argument("--exclude", action="append", default=[], help="Specific container names to exclude")
     parser.add_argument("--htaccess", nargs="?", const="/app/.htaccess", default=None, help="Write to local .htaccess file (default path: /app/.htaccess if flag is used without value)")
     parser.add_argument("--skip-health-check", action="store_true", help="Skip health check verification after updating .htaccess")
+    parser.add_argument("--no-backup", action="store_true", help="Disable automatic backup creation before modifying .htaccess")
+    parser.add_argument("--check-htaccess-volume", action="store_true", help="Check and ensure /var/opt/shared/.htaccess:/var/www/html/.htaccess:ro volume exists in docker-compose.yml")
     
     args = parser.parse_args()
     config = Config(
@@ -287,15 +618,20 @@ def main() -> None:
         include=args.include,
         exclude=args.exclude,
         local_htaccess_path=args.htaccess,
-        skip_health_check=args.skip_health_check
+        skip_health_check=args.skip_health_check,
+        backup=not args.no_backup,
+        check_htaccess_volume=args.check_htaccess_volume
     )
+
+    client = get_docker_client()
 
     # Write to local .htaccess if flag was provided
     if config.local_htaccess_path:
         logger.info(f"Writing to local .htaccess at {config.local_htaccess_path}")
-        write_local_htaccess(config.local_htaccess_path, config.dry_run)
+        write_local_htaccess(config.local_htaccess_path, config.dry_run, config.backup, config.skip_health_check, client)
+        logger.info("Local .htaccess write complete. Skipping container .htaccess processing.")
+        return
 
-    client = get_docker_client()
     targets = get_target_containers(client, config)
 
     if not targets:
@@ -303,6 +639,14 @@ def main() -> None:
         return
 
     logger.info(f"Found {len(targets)} target containers.")
+
+    # Check htaccess volume if requested
+    if config.check_htaccess_volume:
+        logger.info("Checking htaccess volume mounts in docker-compose.yml files...")
+        for container in targets:
+            check_and_update_htaccess_volume(container, config)
+        logger.info("htaccess volume check complete.")
+        return
 
     for container in targets:
         process_container(container, config)
