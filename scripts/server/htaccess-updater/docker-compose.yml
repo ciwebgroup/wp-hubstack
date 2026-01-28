@@ -3,19 +3,21 @@ services:
     build: .
     image: wp-htaccess-updater
     container_name: wp-htaccess-manager
-    
+
     # 'host' network mode is crucial here because:
     # 1. The script constructs URLs using 'localhost' and the mapped host port.
-    # 2. Inside the container, 'localhost' typically refers to the container itself, 
+    # 2. Inside the container, 'localhost' typically refers to the container itself,
     #    unless we share the host's networking stack.
     # Note: This works best on Linux. On Docker Desktop (Mac/Windows), this has limitations.
     network_mode: host
-    
+
     # Mount the Docker socket so the script can list and modify other containers
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /usr/bin/docker:/usr/bin/docker:ro
       - /var/opt/shared/.htaccess:/app/.htaccess
-    
+      - /var/opt/sites:/var/opt/sites:rw
+
     # Default command: Runs in dry-run mode for safety.
     # You can change arguments here (e.g., remove --dry-run to actually apply changes).
     command: ["--container-pattern", "wp_"]
