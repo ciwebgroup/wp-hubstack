@@ -210,47 +210,85 @@ else
   docker exec "$CONTAINER_NAME" wp db export
 fi
 
-# Zip the site directory
-if [[ "$DRY_RUN" == true ]]; then
-  echo "[DRY RUN] Would zip ${SITE_DIR} to ${ZIP_FILE}"
-else
-  echo "Zipping site directory to ${ZIP_FILE}..."
-  # Exclude any existing zip/tar files and any directory whose name contains "backup"
-  (
-    cd "$(dirname "$SITE_DIR")" \
-      && zip -rq "$ZIP_FILE" "$(basename "$SITE_DIR")" \
-        -x "*backup*" "*.zip" "*.tar.gz" "*.tgz"
-    
-    # Move the zip file to the wp-content directory
-    if [ -f "$ZIP_FILE" ]; then
-      mv "$ZIP_FILE" "$WP_CONTENT_DIR/"
-    else
-      echo -e "${RED}Error: Zip file ${ZIP_FILE} was not created successfully.${NC}"
-      exit 1
-    fi
+# Create temporary directory for WordPress packaging
+TEMP_DIR=$(mktemp -d)
+WP_DOWNLOAD_URL="https://wordpress.org/latest.zip"
+DOMAIN_NAME="${WP_HOME}"
+FINAL_ZIP_NAME="www.${DOMAIN_NAME}.zip"
 
-  )
+if [[ "$DRY_RUN" == true ]]; then
+  echo "[DRY RUN] Would download WordPress from ${WP_DOWNLOAD_URL}"
+  echo "[DRY RUN] Would rename 'wordpress' dir to '${DOMAIN_NAME}'"
+  echo "[DRY RUN] Would copy wp-content from ${WP_CONTENT_DIR} to ${DOMAIN_NAME}/"
+  echo "[DRY RUN] Would create zip file ${FINAL_ZIP_NAME}"
+else
+  echo "Downloading WordPress from ${WP_DOWNLOAD_URL}..."
+  cd "$TEMP_DIR" || exit 1
+  
+  # Download WordPress
+  if ! curl -sL "$WP_DOWNLOAD_URL" -o wordpress.zip; then
+    echo -e "${RED}Error: Failed to download WordPress.${NC}"
+    rm -rf "$TEMP_DIR"
+    exit 1
+  fi
+  
+  # Extract WordPress
+  echo "Extracting WordPress..."
+  if ! unzip -q wordpress.zip; then
+    echo -e "${RED}Error: Failed to extract WordPress.${NC}"
+    rm -rf "$TEMP_DIR"
+    exit 1
+  fi
+  
+  # Remove the zip file
+  rm wordpress.zip
+  
+  # Rename 'wordpress' directory to domain name
+  echo "Renaming 'wordpress' to '${DOMAIN_NAME}'..."
+  mv wordpress "$DOMAIN_NAME"
+  
+  # Remove default wp-content directory
+  echo "Removing default wp-content..."
+  rm -rf "${DOMAIN_NAME}/wp-content"
+  
+  # Copy site's wp-content to the new WordPress directory
+  echo "Copying wp-content from ${WP_CONTENT_DIR}..."
+  if [ -d "$WP_CONTENT_DIR" ]; then
+    cp -r "$WP_CONTENT_DIR" "${DOMAIN_NAME}/"
+  else
+    echo -e "${RED}Warning: wp-content directory ${WP_CONTENT_DIR} not found.${NC}"
+  fi
+  
+  # Create the final zip file
+  echo "Creating zip file ${FINAL_ZIP_NAME}..."
+  if ! zip -rq "${FINAL_ZIP_NAME}" "$DOMAIN_NAME"; then
+    echo -e "${RED}Error: Failed to create zip file.${NC}"
+    rm -rf "$TEMP_DIR"
+    exit 1
+  fi
+  
+  # Ensure wp-content directory exists
+  if [ ! -d "$WP_CONTENT_DIR" ]; then
+    echo -e "${RED}Error: wp-content directory ${WP_CONTENT_DIR} does not exist. Ensure the site structure is correct.${NC}"
+    rm -rf "$TEMP_DIR"
+    exit 1
+  fi
+  
+  # Move the zip file to wp-content directory
+  echo "Moving zip file to ${WP_CONTENT_DIR}/${FINAL_ZIP_NAME}..."
+  mv "${FINAL_ZIP_NAME}" "$WP_CONTENT_DIR/"
+  
+  # Change ownership of the zip file
+  chown www-data:www-data "${WP_CONTENT_DIR}/${FINAL_ZIP_NAME}"
+  
+  # Clean up temporary directory
+  cd - > /dev/null || exit 1
+  rm -rf "$TEMP_DIR"
+  
   echo -e "\n${GREEN}Zipping completed.${NC}"
 fi
 
-# Ensure wp-content directory exists
-if [ ! -d "$WP_CONTENT_DIR" ]; then
-  echo -e "${RED}Error: wp-content directory ${WP_CONTENT_DIR} does not exist. Ensure the site structure is correct.${NC}"
-  exit 1
-fi
-
-# Change ownership of the zip file and move it to wp-content
-if [[ "$DRY_RUN" == true ]]; then
-  echo "[DRY RUN] Would chown and mv ${ZIP_FILE} into ${WP_CONTENT_DIR}/"
-else
-  echo "Changing ownership of the zip file to www-data:www-data"
-  chown www-data:www-data "$ZIP_FILE"
-
-  echo "Moving zip file to wp-content directory: ${WP_CONTENT_DIR}"
-  mv "$ZIP_FILE" "$WP_CONTENT_DIR/"
-fi
-
-echo -e "${GREEN}Cancellation process for $WP_HOME completed successfully: https://$WP_HOME/wp-content/$WP_HOME.zip ${NC}"
+echo -e "${GREEN}Cancellation process for $WP_HOME completed successfully: https://$WP_HOME/wp-content/${FINAL_ZIP_NAME} ${NC}"
 echo -e "NEW ADMIN EMAIL: ${NEW_ADMIN_EMAIL}"
 echo -e "NEW ADMIN PASS: ${RANDOM_PASSWORD}"
 
